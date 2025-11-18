@@ -9,7 +9,6 @@ import matplotlib.colors as mcolors
 import matplotlib.cm as cm
 import datetime
 import numpy as np
-import time
 
 # ----------------------------------------------------------------------
 # ページ設定
@@ -20,18 +19,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-# ----------------------------------------------------------------------
-# 定数・設定
-# ----------------------------------------------------------------------
-MLB_TEAMS = {
-    'AL East': {'Baltimore Orioles': 'BAL', 'Boston Red Sox': 'BOS', 'New York Yankees': 'NYY', 'Tampa Bay Rays': 'TB', 'Toronto Blue Jays': 'TOR'},
-    'AL Central': {'Chicago White Sox': 'CWS', 'Cleveland Guardians': 'CLE', 'Detroit Tigers': 'DET', 'Kansas City Royals': 'KC', 'Minnesota Twins': 'MIN'},
-    'AL West': {'Houston Astros': 'HOU', 'Los Angeles Angels': 'LAA', 'Oakland Athletics': 'OAK', 'Seattle Mariners': 'SEA', 'Texas Rangers': 'TEX'},
-    'NL East': {'Atlanta Braves': 'ATL', 'Miami Marlins': 'MIA', 'New York Mets': 'NYM', 'Philadelphia Phillies': 'PHI', 'Washington Nationals': 'WSH'},
-    'NL Central': {'Chicago Cubs': 'CHC', 'Cincinnati Reds': 'CIN', 'Milwaukee Brewers': 'MIL', 'Pittsburgh Pirates': 'PIT', 'St. Louis Cardinals': 'STL'},
-    'NL West': {'Arizona Diamondbacks': 'AZ', 'Colorado Rockies': 'COL', 'Los Angeles Dodgers': 'LAD', 'San Diego Padres': 'SD', 'San Francisco Giants': 'SF'}
-}
 
 GAME_TYPE_MAP = {
     'Regular Season': 'R',
@@ -49,8 +36,10 @@ def load_active_rosters(year):
     """指定年のロースター取得。失敗したら前年を試す"""
     def fetch_year(y):
         try:
+            # qual=1 で少なくとも1打席/1球投げた選手を取得
             b = batting_stats(y, qual=1)
             p = pitching_stats(y, qual=1)
+            
             df_b = pd.DataFrame()
             if not b.empty:
                 df_b = b[['Name', 'Team', 'IDfg', 'mlbID']].copy()
@@ -68,101 +57,57 @@ def load_active_rosters(year):
     if roster.empty:
         roster = fetch_year(year - 1)
     
-    return roster.drop_duplicates(subset=['mlbID'], keep='first') if not roster.empty else roster
-
-def fetch_statcast_chunked(start_dt, end_dt, p_id, b_id, verbose=True):
-    """
-    長期間のデータを分割して取得する関数
-    statcast APIは大量データを一度に要求すると失敗しやすいため、
-    期間を分割(チャンク化)して取得し、結合する。
-    """
-    
-    # 文字列型の日付をdatetime型に変換
-    s_date = pd.to_datetime(start_dt)
-    e_date = pd.to_datetime(end_dt)
-    
-    # 分割サイズ (日) - リーグ全体なら短く、選手単体なら長くてもOKだが安全を見て30日
-    # 選手指定なし(リーグ全体)の場合はさらに短くする(5日)
-    if not p_id and not b_id:
-        chunk_days = 5 
-        if (e_date - s_date).days > 30:
-            st.warning("⚠️ 選手を指定せずに30日以上の期間を選択すると、処理に非常に時間がかかるか、タイムアウトする可能性があります。期間を短くするか、選手を指定してください。")
-    else:
-        chunk_days = 45 # 選手指定ありなら45日くらいはいける
-
-    chunks = []
-    current_start = s_date
-    
-    # 進捗バーの表示
-    progress_text = "データ取得中... (期間を分割して取得しています)"
-    my_bar = st.progress(0, text=progress_text)
-    total_days = (e_date - s_date).days
-    if total_days <= 0: total_days = 1
-
-    while current_start <= e_date:
-        current_end = min(current_start + pd.Timedelta(days=chunk_days), e_date)
+    # 重複削除とソート
+    if not roster.empty:
+        roster = roster.drop_duplicates(subset=['mlbID'], keep='first')
+        roster = roster.sort_values('Name')
         
-        s_str = current_start.strftime('%Y-%m-%d')
-        e_str = current_end.strftime('%Y-%m-%d')
-        
-        # 進捗更新
-        progress_percent = min(1.0, (current_end - s_date).days / total_days)
-        my_bar.progress(progress_percent, text=f"{progress_text} {s_str} ~ {e_str}")
-        
-        try:
-            # 1. 投手 vs 打者
-            if p_id and b_id:
-                raw = statcast_pitcher(start_dt=s_str, end_dt=e_str, player_id=p_id)
-                if not raw.empty and 'batter' in raw.columns:
-                    chunk = raw[raw['batter'] == b_id].copy()
-                else: chunk = pd.DataFrame()
-            # 2. 投手のみ
-            elif p_id:
-                chunk = statcast_pitcher(start_dt=s_str, end_dt=e_str, player_id=p_id)
-            # 3. 打者のみ
-            elif b_id:
-                chunk = statcast_batter(start_dt=s_str, end_dt=e_str, player_id=b_id)
-            # 4. 全体
-            else:
-                chunk = statcast(start_dt=s_str, end_dt=e_str)
-            
-            if not chunk.empty:
-                chunks.append(chunk)
-                
-        except Exception as e:
-            print(f"Chunk error ({s_str}-{e_str}): {e}")
-            # エラーが出ても止まらず次の期間へ進む
-            pass
-            
-        current_start = current_end + pd.Timedelta(days=1)
-        time.sleep(0.5) # APIへの負荷軽減
-    
-    my_bar.empty() # バーを消す
-
-    if chunks:
-        return pd.concat(chunks, ignore_index=True)
-    else:
-        return pd.DataFrame()
+    return roster
 
 @st.cache_data(ttl=3600)
 def get_statcast_data(start_dt, end_dt, p_id, b_id, game_types_list):
+    """Statcastデータの取得 (チャンク機能なし・直接取得)"""
     try:
-        # 分割取得ロジックを呼び出し
-        df = fetch_statcast_chunked(start_dt, end_dt, p_id, b_id)
+        df = pd.DataFrame()
+        
+        # API呼び出し前の日付形式チェック
+        try:
+            s_dt = pd.to_datetime(start_dt).strftime('%Y-%m-%d')
+            e_dt = pd.to_datetime(end_dt).strftime('%Y-%m-%d')
+        except:
+            st.error("日付の形式が正しくありません")
+            return pd.DataFrame()
+
+        # 1. 投手 vs 打者
+        if p_id and b_id:
+            p_data = statcast_pitcher(start_dt=s_dt, end_dt=e_dt, player_id=p_id)
+            if not p_data.empty and 'batter' in p_data.columns:
+                df = p_data[p_data['batter'] == b_id].copy()
+        # 2. 投手のみ
+        elif p_id:
+            df = statcast_pitcher(start_dt=s_dt, end_dt=e_dt, player_id=p_id)
+        # 3. 打者のみ
+        elif b_id:
+            df = statcast_batter(start_dt=s_dt, end_dt=e_dt, player_id=b_id)
+        # 4. 両方なし（リーグ全体）
+        else:
+            # 期間が長いとここでタイムアウトする可能性があります
+            df = statcast(start_dt=s_dt, end_dt=e_dt)
         
         # 試合タイプ絞り込み
         if not df.empty and game_types_list:
             if 'game_type' in df.columns:
                 targets = []
                 if 'P' in game_types_list:
-                    targets.extend(['F', 'D', 'L', 'W'])
+                    targets.extend(['F', 'D', 'L', 'W']) # ポストシーズンの細かいコード
                 targets.extend(game_types_list)
                 targets = list(set(targets))
                 
                 df = df[df['game_type'].isin(targets)]
+        
         return df
     except Exception as e:
-        st.error(f"データ処理エラー: {e}")
+        st.error(f"データ取得エラー: {e}")
         return pd.DataFrame()
 
 # ----------------------------------------------------------------------
@@ -175,48 +120,31 @@ def process_statcast_data(df_input):
     if 'game_date' in df.columns:
         df = df.sort_values('game_date').reset_index(drop=True)
 
-    # 基本カラム補完
     cols_to_init = ['balls', 'strikes', 'outs_when_up', 'launch_speed', 'launch_angle', 'woba_value', 'plate_x', 'plate_z']
     for c in cols_to_init:
         if c not in df.columns: df[c] = 0 if c != 'woba_value' else np.nan
 
     if 'events' in df.columns:
         events = df['events'].fillna('nan').str.lower()
-        # ヒット判定
         hits = ['single', 'double', 'triple', 'home_run']
         df['is_hit'] = events.isin(hits).astype(int)
-        
-        # 打数 (AB) イベント
         ab_events = hits + ['field_out', 'strikeout', 'grounded_into_double_play', 'double_play', 'fielders_choice', 'force_out']
         df['is_at_bat'] = events.isin(ab_events).astype(int)
-        
-        # 打席 (PA) イベント
         pa_events = ab_events + ['walk', 'hit_by_pitch', 'sac_fly']
         df['is_pa_event'] = events.isin(pa_events).astype(int)
-        
-        # 塁打
         tb_map = {'single': 1, 'double': 2, 'triple': 3, 'home_run': 4}
         df['slugging_base'] = events.map(tb_map).fillna(0).astype(int)
-        
-        # OBP計算用分母 (SF含む)
         df['is_obp_denom'] = (df['is_at_bat'] | events.isin(['walk', 'hit_by_pitch', 'sac_fly'])).astype(int)
-        # 出塁
         df['is_on_base'] = (df['is_hit'] | events.isin(['walk', 'hit_by_pitch'])).astype(int)
-
-        # 打球発生 (Batted Ball)
         df['is_batted_ball'] = df['type'] == 'X'
     else:
         df['is_hit'] = 0; df['is_at_bat'] = 0; df['is_pa_event'] = 0; df['slugging_base'] = 0; df['is_batted_ball'] = 0
 
-    # Hard Hit (95mph+)
     df['is_hard_hit'] = (df['launch_speed'].fillna(0) >= 95.0).astype(int)
-    
-    # Barrel (簡易定義)
     ls = df['launch_speed'].fillna(0); la = df['launch_angle'].fillna(0)
     cond = (ls >= 98) & (la >= 26) & (la <= 30)
     df['is_barrel'] = np.where(cond, 1, 0)
 
-    # 走者状況
     df['on_1b_bool'] = df['on_1b'].notna()
     df['on_2b_bool'] = df['on_2b'].notna()
     df['on_3b_bool'] = df['on_3b'].notna()
@@ -229,14 +157,10 @@ def process_statcast_data(df_input):
 def get_metrics_summary(df):
     if df.empty: return "No Data"
     pa = df['is_pa_event'].sum()
-    ab = df['is_at_bat'].sum()
-    h = df['is_hit'].sum()
-    
-    ba = h / ab if ab > 0 else 0.0
+    ba = df['is_hit'].sum() / df['is_at_bat'].sum() if df['is_at_bat'].sum() > 0 else 0.0
     obp = df['is_on_base'].sum() / df['is_obp_denom'].sum() if df['is_obp_denom'].sum() > 0 else 0.0
-    slg = df['slugging_base'].sum() / ab if ab > 0 else 0.0
+    slg = df['slugging_base'].sum() / df['is_at_bat'].sum() if df['is_at_bat'].sum() > 0 else 0.0
     ops = obp + slg
-    
     return f"PA: {pa} | BA: {ba:.3f} | OPS: {ops:.3f} | HardHit%: {df['is_hard_hit'].mean():.1%}"
 
 # ----------------------------------------------------------------------
@@ -247,8 +171,7 @@ st.sidebar.title("⚾ MLB Analyzer Pro")
 # --- A. 期間 ---
 st.sidebar.subheader("📅 期間 (Date Range)")
 col_d1, col_d2 = st.sidebar.columns(2)
-# 2025年のシーズン終了後に実行しているので、デフォルトを2025年に
-with col_d1: start_date = st.date_input("開始", datetime.date(2025, 3, 27)) # 開幕戦付近
+with col_d1: start_date = st.date_input("開始", datetime.date(2025, 3, 27))
 with col_d2: end_date = st.date_input("終了", datetime.date(2025, 11, 2))
 
 # --- A2. 試合タイプ ---
@@ -269,31 +192,43 @@ selected_p_id, selected_p_name = None, ""
 selected_b_id, selected_b_name = None, ""
 
 if search_mode == "チームから探す (現役)":
+    # ロースター読み込み
     roster_df = load_active_rosters(2025)
+    
     if not roster_df.empty:
-        # Pitcher
+        # 存在するチーム一覧を作成 (ソート済み)
+        # NaNを除去してリスト化
+        available_teams = sorted([t for t in roster_df['Team'].unique() if pd.notna(t)])
+        
+        # --- 投手選択 ---
         st.sidebar.markdown("**🔽 投手 (Pitcher)**")
-        p_league = st.sidebar.selectbox("リーグ (P)", ["指定なし"] + list(MLB_TEAMS.keys()), key="pl")
-        if p_league != "指定なし":
-            p_team_name = st.sidebar.selectbox("チーム (P)", list(MLB_TEAMS[p_league].keys()), key="pt")
-            team_pitchers = roster_df[(roster_df['Team'] == MLB_TEAMS[p_league][p_team_name]) & (roster_df['Role'] == 'Pitcher')].sort_values('Name')
+        # チーム選択
+        p_team = st.sidebar.selectbox("チーム (P)", ["指定なし"] + available_teams, key="p_team_select")
+        
+        if p_team != "指定なし":
+            # そのチームの投手のみ抽出
+            team_pitchers = roster_df[(roster_df['Team'] == p_team) & (roster_df['Role'] == 'Pitcher')]
             p_select = st.sidebar.selectbox("選手名 (P)", ["指定なし"] + team_pitchers['Name'].tolist())
+            
             if p_select != "指定なし":
                 row = team_pitchers[team_pitchers['Name'] == p_select].iloc[0]
                 selected_p_id, selected_p_name = int(row['mlbID']), p_select
         
-        # Batter
+        # --- 打者選択 ---
         st.sidebar.markdown("**🔽 打者 (Batter)**")
-        b_league = st.sidebar.selectbox("リーグ (B)", ["指定なし"] + list(MLB_TEAMS.keys()), key="bl")
-        if b_league != "指定なし":
-            b_team_name = st.sidebar.selectbox("チーム (B)", list(MLB_TEAMS[b_league].keys()), key="bt")
-            team_batters = roster_df[(roster_df['Team'] == MLB_TEAMS[b_league][b_team_name])].sort_values('Name')
+        # チーム選択
+        b_team = st.sidebar.selectbox("チーム (B)", ["指定なし"] + available_teams, key="b_team_select")
+        
+        if b_team != "指定なし":
+            # そのチームの打者のみ抽出
+            team_batters = roster_df[(roster_df['Team'] == b_team)] # 打者はRole問わず全員候補でも良いが、一旦そのまま
             b_select = st.sidebar.selectbox("選手名 (B)", ["指定なし"] + team_batters['Name'].tolist())
+            
             if b_select != "指定なし":
                 row = team_batters[team_batters['Name'] == b_select].iloc[0]
                 selected_b_id, selected_b_name = int(row['mlbID']), b_select
     else:
-        st.sidebar.error("リスト読込失敗。名前検索をご利用ください。")
+        st.sidebar.error("選手リストの読み込みに失敗しました。インターネット接続を確認するか、名前検索機能をご利用ください。")
 
 else: # 名前検索
     st.sidebar.info("姓(Last Name)を英語入力 (例: judge)")
@@ -364,15 +299,16 @@ if st.sidebar.button("分析実行 (Analyze) 🚀", type="primary"):
     st.subheader(f"⚾ {title_str}")
     st.caption(f"Period: {start_date} ~ {end_date} | Game Types: {', '.join(selected_game_types_label)}")
 
-    # データ取得呼び出し
-    df_raw = get_statcast_data(
-        str(start_date), str(end_date), 
-        selected_p_id, selected_b_id, 
-        selected_game_types_code
-    )
+    # 通常のデータ取得 (チャンクなし)
+    with st.spinner('データ取得・処理中...'):
+        df_raw = get_statcast_data(
+            str(start_date), str(end_date), 
+            selected_p_id, selected_b_id, 
+            selected_game_types_code
+        )
         
     if df_raw.empty:
-        st.warning("データが見つかりませんでした。条件を変更するか、期間を短くして試してください。")
+        st.warning("データが見つかりませんでした。条件を変更してください。")
     else:
         df = process_statcast_data(df_raw)
         df_filtered = df.copy()
@@ -400,17 +336,14 @@ if st.sidebar.button("分析実行 (Analyze) 🚀", type="primary"):
         with col_res1:
             fig, ax = plt.subplots(figsize=(8, 8))
             
-            # ストライクゾーン
             sz_top, sz_bottom, plate_width = 3.5, 1.5, 17/12
             ax.add_patch(patches.Rectangle((-plate_width/2, sz_bottom), plate_width, sz_top-sz_bottom, fill=False, edgecolor='black', lw=2, ls='--'))
             ax.add_patch(patches.Polygon([(-plate_width/2, 0), (plate_width/2, 0), (plate_width/2, 0.2), (0, 0.4), (-plate_width/2, 0.2)], color='gray', alpha=0.3))
             
-            # シルエット
             stand_draw = batter_stand if batter_stand != "All" else 'L'
             base_x = -2.5 if stand_draw == 'R' else 2.5
             ax.add_patch(patches.Ellipse((base_x, 3.0), 2.0, 6.0, color='gray', alpha=0.3))
 
-            # プロットデータ
             df_plot = df_filtered.dropna(subset=['plate_x', 'plate_z'])
             
             if df_plot.empty:
@@ -420,7 +353,7 @@ if st.sidebar.button("分析実行 (Analyze) 🚀", type="primary"):
             elif analysis_type == 'density':
                 try:
                     sns.kdeplot(data=df_plot, x='plate_x', y='plate_z', fill=True, cmap='Reds', alpha=0.6, ax=ax, thresh=0.05)
-                except: pass # データ点が少なすぎてKDEが描けない場合の回避
+                except: pass 
                 ax.scatter(df_plot['plate_x'], df_plot['plate_z'], s=15, color='black', alpha=0.2, label='Pitch')
                 ax.set_title(f"Pitch Density (n={len(df_plot)})")
             
