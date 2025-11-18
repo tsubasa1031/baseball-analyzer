@@ -10,6 +10,7 @@ import matplotlib.cm as cm
 import matplotlib.image as mpimg
 import traceback
 import os
+import time # Time import added back for potential future use
 
 # ----------------------------------------------------------------------
 # ページ設定
@@ -68,6 +69,7 @@ def get_statcast_data_safe(start_dt, end_dt, p_id, b_id, game_types_list):
         elif b_id:
             df = statcast_batter(start_dt=s_dt, end_dt=e_dt, player_id=b_id)
         else:
+            # リーグ全体 (時間がかかり、タイムアウトしやすい)
             df = statcast(start_dt=s_dt, end_dt=e_dt)
         
         # 試合タイプ絞り込み
@@ -80,7 +82,24 @@ def get_statcast_data_safe(start_dt, end_dt, p_id, b_id, game_types_list):
                 df = df[df['game_type'].isin(targets)]
         return df
     except Exception as e:
+        # 呼び出し元でエラーを処理させる
         raise e 
+
+# --- 選手ID検索ヘルパー ---
+def find_player_id(last_name):
+    try:
+        found = playerid_lookup(last_name.lower().strip())
+        if not found.empty:
+            # 最初の候補を使用
+            row = found.iloc[0]
+            player_id = int(row['key_mlbam'])
+            player_name = f"{row['name_first']} {row['name_last']}"
+            return player_id, player_name
+    except Exception as e:
+        st.error(f"選手ID検索エラー ({last_name}): {e}")
+        return None, None
+    return None, None
+
 
 # ----------------------------------------------------------------------
 # 2. データ加工 & 描画補助関数
@@ -205,47 +224,34 @@ def main():
 
     # B. 選手選択 (名前検索のみ)
     st.sidebar.subheader("👤 選手選択 (名前検索)")
-    st.sidebar.caption("Last Name (姓) をローマ字入力してください")
+    st.sidebar.caption("Last Name (姓) をローマ字入力してください。完全一致検索を行います。")
     
-    selected_p_id, selected_p_name = None, ""
-    selected_b_id, selected_b_name = None, ""
-
-    # 投手
     p_search = st.sidebar.text_input("投手 姓 (例: darvish)", key="p_search")
-    p_search_lower = p_search.lower().strip()
-    if p_search_lower:
-        try:
-            found = playerid_lookup(p_search_lower)
-            if not found.empty:
-                found['label'] = found['name_first'] + " " + found['name_last'] + " (" + found['mlb_played_first'].astype(str) + "-" + found['mlb_played_last'].astype(str) + ")"
-                p_choice = st.sidebar.selectbox("候補 (P)", ["指定なし"] + found['label'].tolist(), key="p_choice")
-                if p_choice != "指定なし":
-                    row = found[found['label'] == p_choice].iloc[0]
-                    selected_p_id, selected_p_name = int(row['key_mlbam']), f"{row['name_first']} {row['name_last']}"
-            else: st.sidebar.warning(f"投手 '{p_search}' の候補が見つかりませんでした。")
-        except Exception as e: st.sidebar.error(f"検索エラー: {e}")
-    
-    # 打者
     b_search = st.sidebar.text_input("打者 姓 (例: ohtani)", key="b_search")
-    b_search_lower = b_search.lower().strip()
-    if b_search_lower:
-        try:
-            found = playerid_lookup(b_search_lower)
-            if not found.empty:
-                found['label'] = found['name_first'] + " " + found['name_last'] + " (" + found['mlb_played_first'].astype(str) + "-" + found['mlb_played_last'].astype(str) + ")"
-                b_choice = st.sidebar.selectbox("候補 (B)", ["指定なし"] + found['label'].tolist(), key="b_choice")
-                if b_choice != "指定なし":
-                    row = found[found['label'] == b_choice].iloc[0]
-                    selected_b_id, selected_b_name = int(row['key_mlbam']), f"{row['name_first']} {row['name_last']}"
-            else: st.sidebar.warning(f"打者 '{b_search}' の候補が見つかりませんでした。")
-        except Exception as e: st.sidebar.error(f"検索エラー: {e}")
             
     # データ取得実行ボタン
     if st.sidebar.button("データ取得 (Get Data) 📥", type="primary", key="get_data_button"):
         
+        # 内部で選手IDを特定 (選手ID検索はボタン内に閉じ込める)
+        selected_p_id, selected_p_name = None, ""
+        selected_b_id, selected_b_name = None, ""
+
+        if p_search.strip():
+            selected_p_id, selected_p_name = find_player_id(p_search)
+        
+        if b_search.strip():
+            selected_b_id, selected_b_name = find_player_id(b_search)
+
         if not selected_p_id and not selected_b_id and (end_date - start_date).days > 14:
              st.warning(f"選手が指定されていません。期間({(end_date - start_date).days}日)が長すぎるため、タイムアウトする可能性が高いです。続行します。")
+        
+        if (p_search.strip() and not selected_p_id) or (b_search.strip() and not selected_b_id):
+            st.error("入力された選手名が見つかりませんでした。スペルを確認してください。")
+        
+        if not p_search.strip() and not b_search.strip():
+            st.warning("選手が指定されていません。リーグ全体のデータを取得します。")
 
+        # Statcastデータ取得
         with st.spinner('データ取得中... (時間がかかります)'):
             try:
                 df_raw = get_statcast_data_safe(str(start_date), str(end_date), selected_p_id, selected_b_id, selected_game_types_code)
@@ -262,7 +268,7 @@ def main():
             except Exception as e:
                 st.session_state.raw_data = pd.DataFrame()
                 st.session_state.data_params = None
-                st.error(f"データ取得中にエラーが発生しました。期間を短くしてください。: {e}")
+                st.error(f"データ取得中にエラーが発生しました。期間を短くしてください。\n詳細: {e}")
 
 
     # ==========================================
@@ -410,4 +416,3 @@ if __name__ == "__main__":
     except Exception as e:
         st.error("エラーが発生しました")
         st.code(traceback.format_exc())
-
