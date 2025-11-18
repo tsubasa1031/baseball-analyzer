@@ -9,6 +9,7 @@ import matplotlib.colors as mcolors
 import matplotlib.cm as cm
 import datetime
 import numpy as np
+import time
 
 # ----------------------------------------------------------------------
 # ページ設定
@@ -50,54 +51,118 @@ def load_active_rosters(year):
         try:
             b = batting_stats(y, qual=1)
             p = pitching_stats(y, qual=1)
-            df_b = b[['Name', 'Team', 'IDfg', 'mlbID']].copy(); df_b['Role'] = 'Batter'
-            df_p = p[['Name', 'Team', 'IDfg', 'mlbID']].copy(); df_p['Role'] = 'Pitcher'
+            df_b = pd.DataFrame()
+            if not b.empty:
+                df_b = b[['Name', 'Team', 'IDfg', 'mlbID']].copy()
+                df_b['Role'] = 'Batter'
+            
+            df_p = pd.DataFrame()
+            if not p.empty:
+                df_p = p[['Name', 'Team', 'IDfg', 'mlbID']].copy()
+                df_p['Role'] = 'Pitcher'
+                
             return pd.concat([df_b, df_p], ignore_index=True)
         except: return pd.DataFrame()
 
     roster = fetch_year(year)
     if roster.empty:
-        # st.toast はキャッシュエラーの原因になるため削除し、サイレントに前年へフォールバック
         roster = fetch_year(year - 1)
     
     return roster.drop_duplicates(subset=['mlbID'], keep='first') if not roster.empty else roster
 
+def fetch_statcast_chunked(start_dt, end_dt, p_id, b_id, verbose=True):
+    """
+    長期間のデータを分割して取得する関数
+    statcast APIは大量データを一度に要求すると失敗しやすいため、
+    期間を分割(チャンク化)して取得し、結合する。
+    """
+    
+    # 文字列型の日付をdatetime型に変換
+    s_date = pd.to_datetime(start_dt)
+    e_date = pd.to_datetime(end_dt)
+    
+    # 分割サイズ (日) - リーグ全体なら短く、選手単体なら長くてもOKだが安全を見て30日
+    # 選手指定なし(リーグ全体)の場合はさらに短くする(5日)
+    if not p_id and not b_id:
+        chunk_days = 5 
+        if (e_date - s_date).days > 30:
+            st.warning("⚠️ 選手を指定せずに30日以上の期間を選択すると、処理に非常に時間がかかるか、タイムアウトする可能性があります。期間を短くするか、選手を指定してください。")
+    else:
+        chunk_days = 45 # 選手指定ありなら45日くらいはいける
+
+    chunks = []
+    current_start = s_date
+    
+    # 進捗バーの表示
+    progress_text = "データ取得中... (期間を分割して取得しています)"
+    my_bar = st.progress(0, text=progress_text)
+    total_days = (e_date - s_date).days
+    if total_days <= 0: total_days = 1
+
+    while current_start <= e_date:
+        current_end = min(current_start + pd.Timedelta(days=chunk_days), e_date)
+        
+        s_str = current_start.strftime('%Y-%m-%d')
+        e_str = current_end.strftime('%Y-%m-%d')
+        
+        # 進捗更新
+        progress_percent = min(1.0, (current_end - s_date).days / total_days)
+        my_bar.progress(progress_percent, text=f"{progress_text} {s_str} ~ {e_str}")
+        
+        try:
+            # 1. 投手 vs 打者
+            if p_id and b_id:
+                raw = statcast_pitcher(start_dt=s_str, end_dt=e_str, player_id=p_id)
+                if not raw.empty and 'batter' in raw.columns:
+                    chunk = raw[raw['batter'] == b_id].copy()
+                else: chunk = pd.DataFrame()
+            # 2. 投手のみ
+            elif p_id:
+                chunk = statcast_pitcher(start_dt=s_str, end_dt=e_str, player_id=p_id)
+            # 3. 打者のみ
+            elif b_id:
+                chunk = statcast_batter(start_dt=s_str, end_dt=e_str, player_id=b_id)
+            # 4. 全体
+            else:
+                chunk = statcast(start_dt=s_str, end_dt=e_str)
+            
+            if not chunk.empty:
+                chunks.append(chunk)
+                
+        except Exception as e:
+            print(f"Chunk error ({s_str}-{e_str}): {e}")
+            # エラーが出ても止まらず次の期間へ進む
+            pass
+            
+        current_start = current_end + pd.Timedelta(days=1)
+        time.sleep(0.5) # APIへの負荷軽減
+    
+    my_bar.empty() # バーを消す
+
+    if chunks:
+        return pd.concat(chunks, ignore_index=True)
+    else:
+        return pd.DataFrame()
+
 @st.cache_data(ttl=3600)
 def get_statcast_data(start_dt, end_dt, p_id, b_id, game_types_list):
     try:
-        df = pd.DataFrame()
-        # 1. 投手 vs 打者
-        if p_id and b_id:
-            p_data = statcast_pitcher(start_dt=start_dt, end_dt=end_dt, player_id=p_id)
-            if not p_data.empty and 'batter' in p_data.columns:
-                df = p_data[p_data['batter'] == b_id].copy()
-        # 2. 投手のみ
-        elif p_id:
-            df = statcast_pitcher(start_dt=start_dt, end_dt=end_dt, player_id=p_id)
-        # 3. 打者のみ
-        elif b_id:
-            df = statcast_batter(start_dt=start_dt, end_dt=end_dt, player_id=b_id)
-        # 4. 両方なし（リーグ全体）
-        else:
-            # 注意: 期間が長いとタイムアウトする可能性があるため、statcast()を使用
-            df = statcast(start_dt=start_dt, end_dt=end_dt)
+        # 分割取得ロジックを呼び出し
+        df = fetch_statcast_chunked(start_dt, end_dt, p_id, b_id)
         
         # 試合タイプ絞り込み
         if not df.empty and game_types_list:
             if 'game_type' in df.columns:
                 targets = []
-                # 'P' (Postseason) が選択された場合、実データ上のコード (F, D, L, W) も含める
                 if 'P' in game_types_list:
                     targets.extend(['F', 'D', 'L', 'W'])
-                # 選択されたコードそのものも含める
                 targets.extend(game_types_list)
-                # 重複排除
                 targets = list(set(targets))
                 
                 df = df[df['game_type'].isin(targets)]
         return df
     except Exception as e:
-        st.error(f"データ取得エラー: {e}")
+        st.error(f"データ処理エラー: {e}")
         return pd.DataFrame()
 
 # ----------------------------------------------------------------------
@@ -111,7 +176,7 @@ def process_statcast_data(df_input):
         df = df.sort_values('game_date').reset_index(drop=True)
 
     # 基本カラム補完
-    cols_to_init = ['balls', 'strikes', 'outs_when_up', 'launch_speed', 'launch_angle', 'woba_value']
+    cols_to_init = ['balls', 'strikes', 'outs_when_up', 'launch_speed', 'launch_angle', 'woba_value', 'plate_x', 'plate_z']
     for c in cols_to_init:
         if c not in df.columns: df[c] = 0 if c != 'woba_value' else np.nan
 
@@ -148,7 +213,7 @@ def process_statcast_data(df_input):
     
     # Barrel (簡易定義)
     ls = df['launch_speed'].fillna(0); la = df['launch_angle'].fillna(0)
-    cond = (ls >= 98) & (la >= 26) & (la <= 30) # 実際はもっと範囲が広いが軽量化のため簡易版
+    cond = (ls >= 98) & (la >= 26) & (la <= 30)
     df['is_barrel'] = np.where(cond, 1, 0)
 
     # 走者状況
@@ -182,7 +247,8 @@ st.sidebar.title("⚾ MLB Analyzer Pro")
 # --- A. 期間 ---
 st.sidebar.subheader("📅 期間 (Date Range)")
 col_d1, col_d2 = st.sidebar.columns(2)
-with col_d1: start_date = st.date_input("開始", datetime.date(2025, 3, 1))
+# 2025年のシーズン終了後に実行しているので、デフォルトを2025年に
+with col_d1: start_date = st.date_input("開始", datetime.date(2025, 3, 27)) # 開幕戦付近
 with col_d2: end_date = st.date_input("終了", datetime.date(2025, 11, 2))
 
 # --- A2. 試合タイプ ---
@@ -192,7 +258,6 @@ selected_game_types_label = st.sidebar.multiselect(
     options=list(GAME_TYPE_MAP.keys()),
     default=['Regular Season', 'Postseason']
 )
-# ラベルをコードに変換 ('Regular Season' -> 'R')
 selected_game_types_code = [GAME_TYPE_MAP[l] for l in selected_game_types_label]
 
 # --- B. 選手選択 ---
@@ -291,7 +356,6 @@ analysis_type = ANALYSIS_OPTIONS[analysis_label]
 # ----------------------------------------------------------------------
 if st.sidebar.button("分析実行 (Analyze) 🚀", type="primary"):
     
-    # タイトル生成
     title_str = "League Wide Analysis"
     if selected_p_name and selected_b_name: title_str = f"Pitcher: {selected_p_name} vs Batter: {selected_b_name}"
     elif selected_p_name: title_str = f"Pitcher: {selected_p_name}"
@@ -300,16 +364,15 @@ if st.sidebar.button("分析実行 (Analyze) 🚀", type="primary"):
     st.subheader(f"⚾ {title_str}")
     st.caption(f"Period: {start_date} ~ {end_date} | Game Types: {', '.join(selected_game_types_label)}")
 
-    # データ取得
-    with st.spinner('データ取得・処理中... (データ量が多い場合は時間がかかります)'):
-        df_raw = get_statcast_data(
-            str(start_date), str(end_date), 
-            selected_p_id, selected_b_id, 
-            selected_game_types_code
-        )
+    # データ取得呼び出し
+    df_raw = get_statcast_data(
+        str(start_date), str(end_date), 
+        selected_p_id, selected_b_id, 
+        selected_game_types_code
+    )
         
     if df_raw.empty:
-        st.warning("データが見つかりませんでした。条件を変更してください。")
+        st.warning("データが見つかりませんでした。条件を変更するか、期間を短くして試してください。")
     else:
         df = process_statcast_data(df_raw)
         df_filtered = df.copy()
@@ -337,12 +400,12 @@ if st.sidebar.button("分析実行 (Analyze) 🚀", type="primary"):
         with col_res1:
             fig, ax = plt.subplots(figsize=(8, 8))
             
-            # ストライクゾーン描画
+            # ストライクゾーン
             sz_top, sz_bottom, plate_width = 3.5, 1.5, 17/12
             ax.add_patch(patches.Rectangle((-plate_width/2, sz_bottom), plate_width, sz_top-sz_bottom, fill=False, edgecolor='black', lw=2, ls='--'))
             ax.add_patch(patches.Polygon([(-plate_width/2, 0), (plate_width/2, 0), (plate_width/2, 0.2), (0, 0.4), (-plate_width/2, 0.2)], color='gray', alpha=0.3))
             
-            # 打者シルエット
+            # シルエット
             stand_draw = batter_stand if batter_stand != "All" else 'L'
             base_x = -2.5 if stand_draw == 'R' else 2.5
             ax.add_patch(patches.Ellipse((base_x, 3.0), 2.0, 6.0, color='gray', alpha=0.3))
@@ -351,22 +414,22 @@ if st.sidebar.button("分析実行 (Analyze) 🚀", type="primary"):
             df_plot = df_filtered.dropna(subset=['plate_x', 'plate_z'])
             
             if df_plot.empty:
-                st.info("プロット対象のデータがありません")
+                st.info(f"条件に該当するデータがありません (元のデータ数: {len(df_filtered)})")
             
-            # A. Density (KDE Plot)
+            # A. Density
             elif analysis_type == 'density':
-                sns.kdeplot(data=df_plot, x='plate_x', y='plate_z', fill=True, cmap='Reds', alpha=0.6, ax=ax, thresh=0.05)
+                try:
+                    sns.kdeplot(data=df_plot, x='plate_x', y='plate_z', fill=True, cmap='Reds', alpha=0.6, ax=ax, thresh=0.05)
+                except: pass # データ点が少なすぎてKDEが描けない場合の回避
                 ax.scatter(df_plot['plate_x'], df_plot['plate_z'], s=15, color='black', alpha=0.2, label='Pitch')
                 ax.set_title(f"Pitch Density (n={len(df_plot)})")
             
-            # B. Grid Maps (5x5 Grid)
+            # B. Grid Maps
             else:
-                # グリッド設定
                 grid_size = 5
-                x_edges = np.linspace(-2.0, 2.0, grid_size + 1) # 横幅目安
-                z_edges = np.linspace(0.5, 4.5, grid_size + 1)  # 高さ目安
+                x_edges = np.linspace(-2.0, 2.0, grid_size + 1)
+                z_edges = np.linspace(0.5, 4.5, grid_size + 1)
                 
-                # 指標設定
                 if analysis_type == 'ops':
                     metric_name = 'OPS'; vmin, vmax = 0.4, 1.2; cmap = 'coolwarm'
                 elif analysis_type == 'ba':
@@ -381,13 +444,11 @@ if st.sidebar.button("分析実行 (Analyze) 🚀", type="primary"):
                 norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
                 m = cm.ScalarMappable(norm=norm, cmap=cmap)
 
-                # グリッド計算ループ
                 for i in range(grid_size):
                     for j in range(grid_size):
                         x_min, x_max = x_edges[j], x_edges[j+1]
                         z_min, z_max = z_edges[i], z_edges[i+1]
                         
-                        # ゾーン内のデータを抽出
                         in_zone = df_plot[
                             (df_plot['plate_x'] >= x_min) & (df_plot['plate_x'] < x_max) &
                             (df_plot['plate_z'] >= z_min) & (df_plot['plate_z'] < z_max)
@@ -424,14 +485,12 @@ if st.sidebar.button("分析実行 (Analyze) 🚀", type="primary"):
                                 color = m.to_rgba(val)
                                 rect = patches.Rectangle((x_min, z_min), x_max-x_min, z_max-z_min, linewidth=0.5, edgecolor='gray', facecolor=color, alpha=0.8)
                                 ax.add_patch(rect)
-                                
-                                # テキスト表示 (値とサンプル数)
                                 txt_color = 'white' if (norm(val) > 0.7 or norm(val) < 0.3) else 'black'
                                 fmt = ".3f" if analysis_type in ['ops', 'ba', 'woba'] else ".1%"
                                 ax.text((x_min+x_max)/2, (z_min+z_max)/2, f"{val:{fmt}}\n({count_label})", 
                                         ha='center', va='center', fontsize=7, color=txt_color)
 
-                ax.set_title(f"{metric_name} Map (Grid Analysis)")
+                ax.set_title(f"{metric_name} Map")
                 plt.colorbar(m, ax=ax, label=metric_name)
 
             ax.set_xlim(2.5, -2.5); ax.set_ylim(0, 5.0); ax.set_aspect('equal')
@@ -439,11 +498,11 @@ if st.sidebar.button("分析実行 (Analyze) 🚀", type="primary"):
             st.pyplot(fig)
 
         with col_res2:
-            st.markdown("### Summary Metrics")
+            st.markdown("### Summary")
             st.info(get_metrics_summary(df_filtered))
-            st.write(f"Total Pitches: {len(df_filtered)}")
+            st.write(f"Total: {len(df_filtered)}")
             
-            st.markdown("### Raw Data")
+            st.markdown("### Data")
             cols = ['game_date', 'events', 'description', 'pitch_type', 'launch_speed', 'launch_angle']
             valid_cols = [c for c in cols if c in df_filtered.columns]
             st.dataframe(df_filtered[valid_cols].head(20), height=400)
