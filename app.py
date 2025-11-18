@@ -54,6 +54,10 @@ def initialize_session_state():
     if 'data_params' not in st.session_state:
         # 7つの要素で初期化
         st.session_state.data_params = (None, None, None, None, None, False, False)
+    if 'p_lookup_results' not in st.session_state:
+        st.session_state.p_lookup_results = pd.DataFrame() # 投手検索結果
+    if 'b_lookup_results' not in st.session_state:
+        st.session_state.b_lookup_results = pd.DataFrame() # 打者検索結果
 
 # ----------------------------------------------------------------------
 # 1. データ取得関数
@@ -73,6 +77,7 @@ def get_statcast_data_safe(start_dt, end_dt, p_id, b_id, game_types_list):
         elif b_id:
             df = statcast_batter(start_dt=s_dt, end_dt=e_dt, player_id=b_id)
         else:
+            # リーグ全体 (時間がかかり、タイムアウトしやすい)
             df = statcast(start_dt=s_dt, end_dt=e_dt)
         
         # 試合タイプ絞り込み
@@ -87,23 +92,27 @@ def get_statcast_data_safe(start_dt, end_dt, p_id, b_id, game_types_list):
     except Exception as e:
         raise e 
 
-# --- 選手ID検索ヘルパー (入力確定後検索) ---
-def lookup_player_stable(last_name, key):
-    """選手を検索し、候補リストを返す (安定版)"""
-    if not last_name.strip():
-        return pd.DataFrame(), None, None
+# --- 選手ID検索ヘルパー (動的予測用) ---
+def lookup_player_dynamic(key):
+    """Text inputの内容が変更されたときに実行されるコールバック"""
+    last_name = st.session_state[key].strip()
+    target_key = f"{key}_results" # p_search_results or b_search_results
+
+    if not last_name:
+        st.session_state[target_key] = pd.DataFrame()
+        return
 
     try:
-        results = playerid_lookup(last_name.lower().strip())
+        # ここで外部APIにアクセス
+        results = playerid_lookup(last_name.lower())
         if not results.empty:
             results['label'] = results['name_first'] + " " + results['name_last'] + " (" + results['mlb_played_first'].astype(str) + "-" + results['mlb_played_last'].astype(str) + ")"
-            # 最初の候補をデフォルトとする
-            return results, int(results.iloc[0]['key_mlbam']), f"{results.iloc[0]['name_first']} {results.iloc[0]['name_last']}"
+            st.session_state[target_key] = results[['key_mlbam', 'label', 'name_first', 'name_last', 'position']].copy()
         else:
-            return pd.DataFrame(), None, None
+            st.session_state[target_key] = pd.DataFrame()
     except Exception as e:
-        st.sidebar.error(f"選手ID検索エラー ({last_name}): {e}")
-        return pd.DataFrame(), None, None
+        # 検索失敗してもアプリは落とさない
+        st.session_state[target_key] = pd.DataFrame()
 
 
 # ----------------------------------------------------------------------
@@ -200,14 +209,39 @@ def draw_5x5_grid(ax):
 
 def draw_batter(ax, stand):
     """打者画像またはシルエットを描画 (投手視点)"""
-    if stand == 'R':
-        base_x = -2.5 # 投手視点: 右打者は左側
-    else:
-        base_x = 2.5 # 投手視点: 左打者は右側
+    # 視点：投手視点（ホームベースの方向を見る）
+    # X軸：左側がマイナス、右側がプラス
+    # 打者位置：右打者（R）は画面の左側 (X<0) に配置
+    # 打者位置：左打者（L）は画面の右側 (X>0) に配置
 
-    # シルエットで代用
-    ax.add_patch(patches.Ellipse((base_x, 3.0), 1.5, 5.5, color='gray', alpha=0.5, zorder=0))
-    ax.add_patch(patches.Circle((base_x, 5.5), 0.4, color='gray', alpha=0.5, zorder=0))
+    if stand == 'R':
+        # 投手視点: 右打者（R）は左側 (X<0) に配置
+        base_x = -2.5 
+        extent = [-4.0, -1.0, 0, 6.0]
+    else:
+        # 投手視点: 左打者（L）は右側 (X>0) に配置
+        base_x = 2.5
+        extent = [1.0, 4.0, 0, 6.0]
+
+    loaded = False
+    img_file = 'batterR.png' if stand == 'R' else 'batterL.png'
+    
+    # 1. 画像ファイルの存在チェックと読み込み (GitHubに画像があれば表示)
+    if os.path.exists(img_file):
+        try:
+            # 投手視点では、Rの画像が左側に来るようにする
+            img = mpimg.imread(img_file)
+            ax.imshow(img, extent=extent, aspect='auto', zorder=0)
+            loaded = True
+        except: 
+             pass 
+    
+    # 2. 画像がない場合、シルエットで代用
+    if not loaded:
+        # シルエット (胴体)
+        ax.add_patch(patches.Ellipse((base_x, 3.0), 1.5, 5.5, color='gray', alpha=0.5, zorder=0))
+        # シルエット (頭部)
+        ax.add_patch(patches.Circle((base_x, 5.5), 0.4, color='gray', alpha=0.5, zorder=0))
 
 
 # ----------------------------------------------------------------------
@@ -238,53 +272,37 @@ def main():
 
     # B. 選手選択 (予測検索)
     st.sidebar.subheader("👤 選手選択 (予測検索)")
-    st.sidebar.caption("姓(Last Name)をローマ字で入力し、Enterキーで確定すると候補が表示されます。")
+    st.sidebar.caption("姓(Last Name)をローマ字で入力すると、下の選択肢が更新されます。")
     
     # --- 投手検索 ---
-    p_search = st.sidebar.text_input("投手 姓 (例: darvish)", key="p_search")
+    # on_changeでリアルタイム検索を実行
+    p_search = st.sidebar.text_input("投手 姓 (例: darvish)", key="p_search", on_change=lookup_player_dynamic, args=('p_search',))
     
-    # 入力が確定されたら検索を実行
-    p_results, p_id_default, p_name_default = lookup_player_stable(p_search, 'p_search')
-
     p_options = ['指定なし']
-    p_default_index = 0
-    if not p_results.empty:
-        p_options.extend(p_results['label'].tolist())
-        # 検索結果が見つかった場合、最初の要素をデフォルトに設定
-        if len(p_options) > 1:
-            p_default_index = 1
-    
-    p_choice_label = st.sidebar.selectbox("候補 (P)", p_options, index=p_default_index, key="p_choice")
+    if not st.session_state.p_lookup_results.empty:
+        p_options.extend(st.session_state.p_lookup_results['label'].tolist())
+    p_choice_label = st.sidebar.selectbox("候補 (P)", p_options, key="p_choice")
 
     
     # --- 打者検索 ---
-    b_search = st.sidebar.text_input("打者 姓 (例: ohtani)", key="b_search")
+    # on_changeでリアルタイム検索を実行
+    b_search = st.sidebar.text_input("打者 姓 (例: ohtani)", key="b_search", on_change=lookup_player_dynamic, args=('b_search',))
     
-    # 入力が確定されたら検索を実行
-    b_results, b_id_default, b_name_default = lookup_player_stable(b_search, 'b_search')
-
     b_options = ['指定なし']
-    b_default_index = 0
-    if not b_results.empty:
-        b_options.extend(b_results['label'].tolist())
-        # 検索結果が見つかった場合、最初の要素をデフォルトに設定
-        if len(b_options) > 1:
-            b_default_index = 1
-
-    b_choice_label = st.sidebar.selectbox("候補 (B)", b_options, index=b_default_index, key="b_choice")
+    if not st.session_state.b_lookup_results.empty:
+        b_options.extend(st.session_state.b_lookup_results['label'].tolist())
+    b_choice_label = st.sidebar.selectbox("候補 (B)", b_options, key="b_choice")
 
     
-    # 最終的なIDを決定
-    selected_p_id, selected_p_name = None, ""
-    selected_b_id, selected_b_name = None, ""
+    # 最終的なIDを特定
+    def get_selected_player(choice_label, results_df):
+        if choice_label == "指定なし" or results_df.empty: return None, ""
+        row = results_df[results_df['label'] == choice_label]
+        if row.empty: return None, ""
+        return int(row.iloc[0]['key_mlbam']), f"{row.iloc[0]['name_first']} {row.iloc[0]['name_last']}"
 
-    if p_choice_label != '指定なし' and not p_results.empty:
-        row = p_results[p_results['label'] == p_choice_label].iloc[0]
-        selected_p_id, selected_p_name = int(row['key_mlbam']), f"{row['name_first']} {row['name_last']}"
-
-    if b_choice_label != '指定なし' and not b_results.empty:
-        row = b_results[b_results['label'] == b_choice_label].iloc[0]
-        selected_b_id, selected_b_name = int(row['key_mlbam']), f"{row['name_first']} {row['name_last']}"
+    selected_p_id, selected_p_name = get_selected_player(p_choice_label, st.session_state.p_lookup_results)
+    selected_b_id, selected_b_name = get_selected_player(b_choice_label, st.session_state.b_lookup_results)
             
     # データ取得実行ボタン
     if st.sidebar.button("データ取得 (Get Data) 📥", type="primary", key="get_data_button"):
@@ -443,7 +461,7 @@ def main():
                     plt.colorbar(m, ax=ax, label=metric)
 
                 # 投手視点の設定 (左がマイナス、右がプラス)
-                ax.set_xlim(-2.5, 2.5)
+                ax.set_xlim(-2.5, 2.5) 
                 ax.set_ylim(0, 6.0)
                 ax.set_aspect('equal')
                 ax.set_xlabel("Pitcher's View (Left=RHB, Right=LHB)")
