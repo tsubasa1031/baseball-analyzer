@@ -54,6 +54,7 @@ if 'raw_data' not in st.session_state:
 # ----------------------------------------------------------------------
 # 1. データ取得関数
 # ----------------------------------------------------------------------
+# @st.cache_data デコレーターは削除し、関数内に try-except を残すことで安定性を確保
 def load_active_rosters_safe(year):
     """ロースター取得関数"""
     def fetch_year(y):
@@ -198,6 +199,7 @@ def draw_batter(ax, stand):
         base_x = -2.5
 
     loaded = False
+    # GitHubに画像をアップロードしている場合、Streamlit Cloudのルートディレクトリにあるかをチェック
     if os.path.exists(img_file):
         try:
             img = mpimg.imread(img_file)
@@ -223,8 +225,8 @@ def main():
     
     # A. 期間
     col_d1, col_d2 = st.sidebar.columns(2)
-    with col_d1: start_date = st.date_input("開始", datetime.date(2025, 3, 27))
-    with col_d2: end_date = st.date_input("終了", datetime.date(2025, 11, 2))
+    with col_d1: start_date = st.date_input("開始", datetime.date(2025, 3, 27), key="start_date_input")
+    with col_d2: end_date = st.date_input("終了", datetime.date(2025, 11, 2), key="end_date_input")
 
     # A2. 試合タイプ
     selected_game_types_label = st.sidebar.multiselect(
@@ -271,9 +273,10 @@ def main():
         
         # 投手
         p_search = st.sidebar.text_input("投手 姓 (例: darvish)", key="p_search")
-        if p_search:
+        p_search_lower = p_search.lower().strip()
+        if p_search_lower:
             try:
-                found = playerid_lookup(p_search)
+                found = playerid_lookup(p_search_lower)
                 if not found.empty:
                     found['label'] = found['name_first'] + " " + found['name_last'] + " (" + found['mlb_played_first'].astype(str) + "-" + found['mlb_played_last'].astype(str) + ")"
                     p_choice = st.sidebar.selectbox("候補 (P)", ["指定なし"] + found['label'].tolist(), key="p_choice")
@@ -281,13 +284,14 @@ def main():
                         row = found[found['label'] == p_choice].iloc[0]
                         selected_p_id, selected_p_name = int(row['key_mlbam']), f"{row['name_first']} {row['name_last']}"
                 else: st.sidebar.warning(f"投手 '{p_search}' の候補が見つかりませんでした。")
-            except Exception as e: st.sidebar.error(f"検索エラー: {e}")
+            except Exception as e: st.sidebar.error(f"検索エラー: {e}. スペルを確認してください。")
         
         # 打者
         b_search = st.sidebar.text_input("打者 姓 (例: ohtani)", key="b_search")
-        if b_search:
+        b_search_lower = b_search.lower().strip()
+        if b_search_lower:
             try:
-                found = playerid_lookup(b_search)
+                found = playerid_lookup(b_search_lower)
                 if not found.empty:
                     found['label'] = found['name_first'] + " " + found['name_last'] + " (" + found['mlb_played_first'].astype(str) + "-" + found['mlb_played_last'].astype(str) + ")"
                     b_choice = st.sidebar.selectbox("候補 (B)", ["指定なし"] + found['label'].tolist(), key="b_choice")
@@ -295,14 +299,13 @@ def main():
                         row = found[found['label'] == b_choice].iloc[0]
                         selected_b_id, selected_b_name = int(row['key_mlbam']), f"{row['name_first']} {row['name_last']}"
                 else: st.sidebar.warning(f"打者 '{b_search}' の候補が見つかりませんでした。")
-            except Exception as e: st.sidebar.error(f"検索エラー: {e}")
+            except Exception as e: st.sidebar.error(f"検索エラー: {e}. スペルを確認してください。")
             
     # データ取得実行ボタン
     if st.sidebar.button("データ取得 (Get Data) 📥", type="primary", key="get_data_button"):
         
         if not selected_p_id and not selected_b_id and (end_date - start_date).days > 14:
-             if not st.warning(f"選手が指定されていません。期間({(end_date - start_date).days}日)が長すぎるため、タイムアウトする可能性が高いです。続行しますか？"):
-                 st.stop() # 警告後に続行しない場合は停止
+             st.warning(f"選手が指定されていません。期間({(end_date - start_date).days}日)が長すぎるため、タイムアウトする可能性が高いです。続行します。")
 
         with st.spinner('データ取得中... (時間がかかります)'):
             try:
@@ -345,18 +348,18 @@ def main():
 
         # C. 詳細フィルター
         with st.sidebar.expander("⚙️ 詳細フィルター", expanded=True):
-            pitch_code = st.selectbox("球種", ['', 'FF', 'SL', 'CU', 'CH', 'FS', 'SI', 'FC', 'ST'], format_func=lambda x: "All" if x == "" else x)
-            batter_stand = st.radio("打席", ["All", "R", "L"], horizontal=True, index=0)
+            pitch_code = st.selectbox("球種", ['', 'FF', 'SL', 'CU', 'CH', 'FS', 'SI', 'FC', 'ST'], format_func=lambda x: "All" if x == "" else x, key="filter_pitch_code")
+            batter_stand = st.radio("打席", ["All", "R", "L"], horizontal=True, index=0, key="filter_batter_stand")
             c1, c2 = st.columns(2)
             with c1:
-                target_balls = st.selectbox("ボール", ['', '0', '1', '2', '3'])
-                target_outs = st.selectbox("アウト", ['', '0', '1', '2'])
+                target_balls = st.selectbox("ボール", ['', '0', '1', '2', '3'], key="filter_balls")
+                target_outs = st.selectbox("アウト", ['', '0', '1', '2'], key="filter_outs")
             with c2:
-                target_strikes = st.selectbox("ストライク", ['', '0', '1', '2'])
-                target_runners = st.selectbox("走者", ['', 'Empty', 'RISP', 'On Base (Not RISP)'])
+                target_strikes = st.selectbox("ストライク", ['', '0', '1', '2'], key="filter_strikes")
+                target_runners = st.selectbox("走者", ['', 'Empty', 'RISP', 'On Base (Not RISP)'], key="filter_runners")
 
-            target_bb_type = st.selectbox("打球タイプ", ['', 'ground_ball', 'fly_ball', 'line_drive', 'popup'])
-            target_result = st.selectbox("結果", ['', 'strikeout', 'walk', 'single', 'double', 'triple', 'home_run', 'hit_into_play', 'woba_zero'])
+            target_bb_type = st.selectbox("打球タイプ", ['', 'ground_ball', 'fly_ball', 'line_drive', 'popup'], key="filter_bb_type")
+            target_result = st.selectbox("結果", ['', 'strikeout', 'walk', 'single', 'double', 'triple', 'home_run', 'hit_into_play', 'woba_zero'], key="filter_result")
 
         # D. 分析タイプ
         ANALYSIS_OPTIONS = {
@@ -367,11 +370,11 @@ def main():
             'Hard Hit% Map (強打率)': 'hard_hit',
             'Barrel% Map (バレル率)': 'barrel'
         }
-        analysis_label = st.sidebar.selectbox("📊 分析タイプ", list(ANALYSIS_OPTIONS.keys()))
+        analysis_label = st.sidebar.selectbox("📊 分析タイプ", list(ANALYSIS_OPTIONS.keys()), key="filter_analysis_type")
         analysis_type = ANALYSIS_OPTIONS[analysis_label]
 
         # グラフ描画実行ボタン
-        if st.sidebar.button("グラフ描画 (Analyze & Plot) 📊", type="secondary"):
+        if st.sidebar.button("グラフ描画 (Analyze & Plot) 📊", type="secondary", key="plot_button"):
             
             df = process_statcast_data(st.session_state.raw_data)
             df_filtered = df.copy()
