@@ -53,7 +53,8 @@ def initialize_session_state():
     if 'raw_data' not in st.session_state:
         st.session_state.raw_data = pd.DataFrame()
     if 'data_params' not in st.session_state:
-        st.session_state.data_params = None 
+        # 7つの要素で初期化
+        st.session_state.data_params = (None, None, None, None, None, False, False)
     if 'p_lookup_results' not in st.session_state:
         st.session_state.p_lookup_results = pd.DataFrame() # 投手検索結果
     if 'b_lookup_results' not in st.session_state:
@@ -104,7 +105,8 @@ def lookup_and_cache(last_name, target_key):
         results = playerid_lookup(last_name.lower().strip())
         if not results.empty:
             results['label'] = results['name_first'] + " " + results['name_last'] + " (" + results['mlb_played_first'].astype(str) + "-" + results['mlb_played_last'].astype(str) + ")"
-            st.session_state[target_key] = results[['key_mlbam', 'label', 'name_first', 'name_last', 'position']]
+            # 必要なカラムのみ保持
+            st.session_state[target_key] = results[['key_mlbam', 'label', 'name_first', 'name_last', 'position']].copy()
         else:
             st.session_state[target_key] = pd.DataFrame()
     except Exception as e:
@@ -305,15 +307,20 @@ def main():
                 
                 if df_raw.empty:
                     st.session_state.raw_data = pd.DataFrame()
-                    st.session_state.data_params = None
+                    # 7つの要素を初期化
+                    st.session_state.data_params = (None, None, None, None, None, False, False)
                     st.error("データが見つかりませんでした。条件を変更してください。")
                 else:
+                    # 7つの要素で保存 (修正箇所)
+                    is_p_focus = selected_p_id is not None
+                    is_b_focus = selected_b_id is not None
                     st.session_state.raw_data = df_raw
-                    st.session_state.data_params = (selected_p_name, selected_b_name, str(start_date), str(end_date), ", ".join(selected_game_types_label), selected_p_id is not None, selected_b_id is not None)
+                    st.session_state.data_params = (selected_p_name, selected_b_name, str(start_date), str(end_date), ", ".join(selected_game_types_label), is_p_focus, is_b_focus)
                     st.success(f"データ取得完了: {len(df_raw)} 球")
             except Exception as e:
                 st.session_state.raw_data = pd.DataFrame()
-                st.session_state.data_params = None
+                # 7つの要素を初期化
+                st.session_state.data_params = (None, None, None, None, None, False, False)
                 st.error(f"データ取得中にエラーが発生しました。\n詳細: {e}")
 
 
@@ -326,7 +333,7 @@ def main():
     if st.session_state.raw_data.empty:
         st.info("データがありません。STEP 1でデータを取得してください。")
     else:
-        # 取得パラメータの表示
+        # 7つの要素を取り出す (ValueError解消)
         p_name, b_name, s_date, e_date, g_types, is_p_focus, is_b_focus = st.session_state.data_params
         
         # タイトル
