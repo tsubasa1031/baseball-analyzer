@@ -9,14 +9,6 @@ import matplotlib.colors as mcolors
 import matplotlib.cm as cm
 import traceback
 
-# ライブラリのインポート自体で失敗する場合に備える
-try:
-    import pybaseball
-    from pybaseball import statcast_pitcher, statcast_batter, playerid_lookup, batting_stats, pitching_stats, statcast
-except ImportError as e:
-    st.error(f"ライブラリの読み込みに失敗しました: {e}")
-    st.stop()
-
 # ----------------------------------------------------------------------
 # ページ設定
 # ----------------------------------------------------------------------
@@ -26,6 +18,18 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# ----------------------------------------------------------------------
+# ライブラリ読み込み (エラーハンドリング付き)
+# ----------------------------------------------------------------------
+try:
+    import pybaseball
+    from pybaseball import statcast_pitcher, statcast_batter, playerid_lookup, batting_stats, pitching_stats, statcast
+    # pybaseballのキャッシュを有効化（独自キャッシュ）
+    pybaseball.cache.enable()
+except ImportError as e:
+    st.error(f"ライブラリの読み込みに失敗しました: {e}")
+    st.stop()
 
 # ----------------------------------------------------------------------
 # 定数・設定
@@ -38,27 +42,13 @@ GAME_TYPE_MAP = {
     'Exhibition': 'E'
 }
 
-MLB_TEAMS_DICT = {
-    'AL East': ['BAL', 'BOS', 'NYY', 'TB', 'TOR'],
-    'AL Central': ['CWS', 'CLE', 'DET', 'KC', 'MIN'],
-    'AL West': ['HOU', 'LAA', 'OAK', 'SEA', 'TEX'],
-    'NL East': ['ATL', 'MIA', 'NYM', 'PHI', 'WSH'],
-    'NL Central': ['CHC', 'CIN', 'MIL', 'PIT', 'STL'],
-    'NL West': ['AZ', 'COL', 'LAD', 'SD', 'SF']
-}
-
 # ----------------------------------------------------------------------
-# 1. データ取得・キャッシュ関数
+# 1. データ取得関数 (キャッシュデコレーターなし)
 # ----------------------------------------------------------------------
-@st.cache_data(ttl=86400)
 def load_active_rosters_safe(year):
-    """
-    ロースター取得関数 (エラーハンドリング強化版)
-    batting_statsなどは外部サイトへのアクセス失敗で落ちやすいため防御する
-    """
+    """ロースター取得関数"""
     def fetch_year(y):
         try:
-            # qual=1 で軽量化
             b = batting_stats(y, qual=1)
             p = pitching_stats(y, qual=1)
             
@@ -72,42 +62,31 @@ def load_active_rosters_safe(year):
                 df_p = p[['Name', 'Team', 'IDfg', 'mlbID']].copy()
                 df_p['Role'] = 'Pitcher'
             
-            # どちらも空なら失敗とみなす
             if df_b.empty and df_p.empty:
                 return pd.DataFrame()
                 
             return pd.concat([df_b, df_p], ignore_index=True)
-        except Exception:
+        except:
             return pd.DataFrame()
 
-    # まず指定年
+    # 指定年 -> 前年 の順でトライ
     roster = fetch_year(year)
-    
-    # 失敗したら前年
     if roster.empty:
         roster = fetch_year(year - 1)
     
-    # それでも失敗したら空を返す (アプリを落とさない)
-    if roster.empty:
-        return pd.DataFrame()
-    
-    # 重複削除とソート
-    try:
-        roster = roster.drop_duplicates(subset=['mlbID'], keep='first')
-        roster = roster.sort_values('Name')
-    except:
-        pass
+    if not roster.empty:
+        try:
+            roster = roster.drop_duplicates(subset=['mlbID'], keep='first')
+            roster = roster.sort_values('Name')
+        except: pass
         
     return roster
 
-@st.cache_data(ttl=3600)
 def get_statcast_data_safe(start_dt, end_dt, p_id, b_id, game_types_list):
-    """Statcastデータの取得 (エラーハンドリング強化版)"""
+    """Statcastデータの取得"""
     try:
-        # 日付変換
         s_dt = pd.to_datetime(start_dt).strftime('%Y-%m-%d')
         e_dt = pd.to_datetime(end_dt).strftime('%Y-%m-%d')
-        
         df = pd.DataFrame()
 
         # 1. 投手 vs 打者
@@ -121,14 +100,9 @@ def get_statcast_data_safe(start_dt, end_dt, p_id, b_id, game_types_list):
         # 3. 打者のみ
         elif b_id:
             df = statcast_batter(start_dt=s_dt, end_dt=e_dt, player_id=b_id)
-        # 4. 両方なし（リーグ全体）
+        # 4. 全体
         else:
-            # データ量過多のエラーを防ぐため try-except
-            try:
-                df = statcast(start_dt=s_dt, end_dt=e_dt)
-            except Exception as e:
-                st.error(f"リーグ全体のデータ取得中にエラーが発生しました。期間を短くしてください。\n詳細: {e}")
-                return pd.DataFrame()
+            df = statcast(start_dt=s_dt, end_dt=e_dt)
         
         # 試合タイプ絞り込み
         if not df.empty and game_types_list:
@@ -142,8 +116,7 @@ def get_statcast_data_safe(start_dt, end_dt, p_id, b_id, game_types_list):
         
         return df
     except Exception as e:
-        # ここでキャッチしてNoneやエラーメッセージを出せるようにする
-        print(f"Statcast fetch error: {e}")
+        st.error(f"データ取得エラー: {e}")
         return pd.DataFrame()
 
 # ----------------------------------------------------------------------
@@ -200,7 +173,7 @@ def get_metrics_summary(df):
     return f"PA: {pa} | BA: {ba:.3f} | OPS: {ops:.3f} | HardHit%: {df['is_hard_hit'].mean():.1%}"
 
 # ----------------------------------------------------------------------
-# 3. アプリケーションのメインロジック (try-exceptでラップ)
+# 3. メインアプリケーション
 # ----------------------------------------------------------------------
 def main():
     st.sidebar.title("⚾ MLB Analyzer Pro")
@@ -214,7 +187,7 @@ def main():
     # --- A2. 試合タイプ ---
     st.sidebar.subheader("🏟️ 試合タイプ")
     selected_game_types_label = st.sidebar.multiselect(
-        "対象試合 (複数選択可)",
+        "対象試合",
         options=list(GAME_TYPE_MAP.keys()),
         default=['Regular Season', 'Postseason']
     )
@@ -229,14 +202,15 @@ def main():
     selected_b_id, selected_b_name = None, ""
 
     # ==========================================
-    # B-1. チームから探す (ロースター読み込み)
+    # B-1. チームから探す
     # ==========================================
     if search_mode == "チームから探す (現役)":
-        # ロースター読み込み (失敗しても空DFが返る)
-        roster_df = load_active_rosters_safe(2025)
+        # キャッシュを使わずに読み込む
+        with st.spinner("選手リストを取得中..."):
+            roster_df = load_active_rosters_safe(2025)
         
         if not roster_df.empty:
-            # 存在するチーム一覧
+            # 利用可能なチームリストを作成
             available_teams = sorted([t for t in roster_df['Team'].unique() if pd.notna(t)])
             
             # 投手
@@ -259,7 +233,7 @@ def main():
                     row = team_batters[team_batters['Name'] == b_select].iloc[0]
                     selected_b_id, selected_b_name = int(row['mlbID']), b_select
         else:
-            st.sidebar.warning("⚠️ 選手リストの取得に失敗しました。データ提供元の接続不良などが考えられます。\n「名前検索」タブに切り替えて直接検索してください。")
+            st.sidebar.warning("⚠️ 選手リストを取得できませんでした。「名前検索」をご利用ください。")
 
     # ==========================================
     # B-2. 名前検索
@@ -290,12 +264,11 @@ def main():
                         selected_b_id, selected_b_name = int(row['key_mlbam']), f"{row['name_first']} {row['name_last']}"
             except: pass
 
-    # --- C. 詳細フィルター ---
+    # --- 詳細フィルター ---
     st.sidebar.markdown("---")
     with st.sidebar.expander("⚙️ 詳細フィルター", expanded=True):
         pitch_code = st.selectbox("球種", ['', 'FF', 'SL', 'CU', 'CH', 'FS', 'SI', 'FC', 'ST'], format_func=lambda x: "All" if x == "" else x)
         batter_stand = st.radio("打席", ["All", "R", "L"], horizontal=True, index=0)
-        
         c1, c2 = st.columns(2)
         with c1:
             target_balls = st.selectbox("ボール", ['', '0', '1', '2', '3'])
@@ -303,11 +276,10 @@ def main():
         with c2:
             target_strikes = st.selectbox("ストライク", ['', '0', '1', '2'])
             target_runners = st.selectbox("走者", ['', 'Empty', 'RISP', 'On Base (Not RISP)'])
-
         target_bb_type = st.selectbox("打球タイプ", ['', 'ground_ball', 'fly_ball', 'line_drive', 'popup'])
         target_result = st.selectbox("結果", ['', 'strikeout', 'walk', 'single', 'double', 'triple', 'home_run', 'hit_into_play', 'woba_zero'])
 
-    # --- D. 分析タイプ ---
+    # --- 分析タイプ ---
     st.sidebar.markdown("---")
     ANALYSIS_OPTIONS = {
         'Density (投球分布)': 'density',
@@ -341,12 +313,12 @@ def main():
             )
             
         if df_raw.empty:
-            st.warning("データが見つかりませんでした。条件を変更してください。")
+            st.warning("データが見つかりませんでした。条件を変更するか、期間を短くして試してください。")
         else:
             df = process_statcast_data(df_raw)
             df_filtered = df.copy()
             
-            # --- フィルター適用 ---
+            # フィルター適用
             if pitch_code:
                 col = 'pitch_type' if 'pitch_type' in df.columns else 'pitch_name'
                 if col in df.columns: df_filtered = df_filtered[df_filtered[col] == pitch_code]
@@ -364,15 +336,13 @@ def main():
                 elif target_result == 'woba_zero': df_filtered = df_filtered[df_filtered['woba_value'] == 0]
                 else: df_filtered = df_filtered[df_filtered['events'] == target_result]
 
-            # --- 描画 ---
+            # 描画
             col_res1, col_res2 = st.columns([3, 1])
             with col_res1:
                 fig, ax = plt.subplots(figsize=(8, 8))
-                
                 sz_top, sz_bottom, plate_width = 3.5, 1.5, 17/12
                 ax.add_patch(patches.Rectangle((-plate_width/2, sz_bottom), plate_width, sz_top-sz_bottom, fill=False, edgecolor='black', lw=2, ls='--'))
                 ax.add_patch(patches.Polygon([(-plate_width/2, 0), (plate_width/2, 0), (plate_width/2, 0.2), (0, 0.4), (-plate_width/2, 0.2)], color='gray', alpha=0.3))
-                
                 stand_draw = batter_stand if batter_stand != "All" else 'L'
                 base_x = -2.5 if stand_draw == 'R' else 2.5
                 ax.add_patch(patches.Ellipse((base_x, 3.0), 2.0, 6.0, color='gray', alpha=0.3))
@@ -381,31 +351,21 @@ def main():
                 
                 if df_plot.empty:
                     st.info(f"条件に該当するデータがありません (元のデータ数: {len(df_filtered)})")
-                
-                # A. Density
                 elif analysis_type == 'density':
-                    try:
-                        sns.kdeplot(data=df_plot, x='plate_x', y='plate_z', fill=True, cmap='Reds', alpha=0.6, ax=ax, thresh=0.05)
+                    try: sns.kdeplot(data=df_plot, x='plate_x', y='plate_z', fill=True, cmap='Reds', alpha=0.6, ax=ax, thresh=0.05)
                     except: pass 
                     ax.scatter(df_plot['plate_x'], df_plot['plate_z'], s=15, color='black', alpha=0.2, label='Pitch')
                     ax.set_title(f"Pitch Density (n={len(df_plot)})")
-                
-                # B. Grid Maps
                 else:
                     grid_size = 5
                     x_edges = np.linspace(-2.0, 2.0, grid_size + 1)
                     z_edges = np.linspace(0.5, 4.5, grid_size + 1)
                     
-                    if analysis_type == 'ops':
-                        metric_name = 'OPS'; vmin, vmax = 0.4, 1.2; cmap = 'coolwarm'
-                    elif analysis_type == 'ba':
-                        metric_name = 'AVG'; vmin, vmax = 0.100, 0.400; cmap = 'coolwarm'
-                    elif analysis_type == 'woba':
-                        metric_name = 'wOBA'; vmin, vmax = 0.200, 0.500; cmap = 'coolwarm'
-                    elif analysis_type == 'hard_hit':
-                        metric_name = 'HardHit%'; vmin, vmax = 0.2, 0.6; cmap = 'Reds'
-                    elif analysis_type == 'barrel':
-                        metric_name = 'Barrel%'; vmin, vmax = 0.0, 0.2; cmap = 'Reds'
+                    if analysis_type == 'ops': metric_name = 'OPS'; vmin, vmax = 0.4, 1.2; cmap = 'coolwarm'
+                    elif analysis_type == 'ba': metric_name = 'AVG'; vmin, vmax = 0.100, 0.400; cmap = 'coolwarm'
+                    elif analysis_type == 'woba': metric_name = 'wOBA'; vmin, vmax = 0.200, 0.500; cmap = 'coolwarm'
+                    elif analysis_type == 'hard_hit': metric_name = 'HardHit%'; vmin, vmax = 0.2, 0.6; cmap = 'Reds'
+                    elif analysis_type == 'barrel': metric_name = 'Barrel%'; vmin, vmax = 0.0, 0.2; cmap = 'Reds'
                     
                     norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
                     m = cm.ScalarMappable(norm=norm, cmap=cmap)
@@ -414,16 +374,10 @@ def main():
                         for j in range(grid_size):
                             x_min, x_max = x_edges[j], x_edges[j+1]
                             z_min, z_max = z_edges[i], z_edges[i+1]
-                            
-                            in_zone = df_plot[
-                                (df_plot['plate_x'] >= x_min) & (df_plot['plate_x'] < x_max) &
-                                (df_plot['plate_z'] >= z_min) & (df_plot['plate_z'] < z_max)
-                            ]
+                            in_zone = df_plot[(df_plot['plate_x'] >= x_min) & (df_plot['plate_x'] < x_max) & (df_plot['plate_z'] >= z_min) & (df_plot['plate_z'] < z_max)]
                             
                             if len(in_zone) > 0:
                                 val = np.nan
-                                count_label = ""
-                                
                                 if analysis_type == 'ops':
                                     denom = in_zone['is_at_bat'].sum()
                                     if denom > 0:
@@ -431,52 +385,33 @@ def main():
                                         obp = in_zone['is_on_base'].sum() / obp_d if obp_d > 0 else 0
                                         slg = in_zone['slugging_base'].sum() / denom
                                         val = obp + slg
-                                        count_label = f"PA:{len(in_zone)}"
                                 elif analysis_type == 'ba':
                                     denom = in_zone['is_at_bat'].sum()
-                                    if denom > 0:
-                                        val = in_zone['is_hit'].sum() / denom
-                                        count_label = f"AB:{denom}"
-                                elif analysis_type == 'woba':
-                                    val = in_zone['woba_value'].mean()
-                                    count_label = f"n:{len(in_zone)}"
-                                elif analysis_type == 'hard_hit':
-                                    val = in_zone['is_hard_hit'].mean()
-                                    count_label = f"n:{len(in_zone)}"
-                                elif analysis_type == 'barrel':
-                                    val = in_zone['is_barrel'].mean()
-                                    count_label = f"n:{len(in_zone)}"
+                                    if denom > 0: val = in_zone['is_hit'].sum() / denom
+                                elif analysis_type == 'woba': val = in_zone['woba_value'].mean()
+                                elif analysis_type == 'hard_hit': val = in_zone['is_hard_hit'].mean()
+                                elif analysis_type == 'barrel': val = in_zone['is_barrel'].mean()
                                 
                                 if not np.isnan(val):
-                                    color = m.to_rgba(val)
-                                    rect = patches.Rectangle((x_min, z_min), x_max-x_min, z_max-z_min, linewidth=0.5, edgecolor='gray', facecolor=color, alpha=0.8)
+                                    rect = patches.Rectangle((x_min, z_min), x_max-x_min, z_max-z_min, linewidth=0.5, edgecolor='gray', facecolor=m.to_rgba(val), alpha=0.8)
                                     ax.add_patch(rect)
                                     txt_color = 'white' if (norm(val) > 0.7 or norm(val) < 0.3) else 'black'
                                     fmt = ".3f" if analysis_type in ['ops', 'ba', 'woba'] else ".1%"
-                                    ax.text((x_min+x_max)/2, (z_min+z_max)/2, f"{val:{fmt}}\n({count_label})", 
-                                            ha='center', va='center', fontsize=7, color=txt_color)
-
+                                    ax.text((x_min+x_max)/2, (z_min+z_max)/2, f"{val:{fmt}}\n(n:{len(in_zone)})", ha='center', va='center', fontsize=7, color=txt_color)
                     ax.set_title(f"{metric_name} Map")
                     plt.colorbar(m, ax=ax, label=metric_name)
 
                 ax.set_xlim(2.5, -2.5); ax.set_ylim(0, 5.0); ax.set_aspect('equal')
-                ax.set_xlabel("Catcher's View (ft)")
                 st.pyplot(fig)
 
             with col_res2:
                 st.markdown("### Summary")
                 st.info(get_metrics_summary(df_filtered))
-                st.write(f"Total: {len(df_filtered)}")
-                
-                st.markdown("### Data")
-                cols = ['game_date', 'events', 'description', 'pitch_type', 'launch_speed', 'launch_angle']
-                valid_cols = [c for c in cols if c in df_filtered.columns]
-                st.dataframe(df_filtered[valid_cols].head(20), height=400)
+                st.dataframe(df_filtered[['game_date', 'events', 'description', 'pitch_type', 'launch_speed']].head(20), height=400)
 
-# 実行ブロック
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
         st.error("予期せぬエラーが発生しました。")
-        st.error(traceback.format_exc()) # 詳細なエラーログを表示
+        st.code(traceback.format_exc())
