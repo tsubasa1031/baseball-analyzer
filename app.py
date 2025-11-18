@@ -165,15 +165,18 @@ def get_metrics_summary(df, is_batter_focus, is_pitcher_focus):
     ops = obp + slg
     hard_hit_rate = df['is_hard_hit'].mean()
     
-    # 動的メトリックタイトル
+    # 動的メトリックタイトルとBAラベルの変更
     if is_batter_focus and not is_pitcher_focus:
         main_metric_title = "打撃分析 (Batting)"
+        ba_label = "BA"
     elif is_pitcher_focus and not is_batter_focus:
         main_metric_title = "投球分析 (Pitching)"
+        ba_label = "BA Against (被打率)"
     else:
         main_metric_title = "集計分析 (Overall)"
+        ba_label = "BA / BA Against"
 
-    return f"#### {main_metric_title}\nPA: {pa} | BA: {ba:.3f} | OPS: {ops:.3f} | HardHit%: {hard_hit_rate:.1%}"
+    return f"#### {main_metric_title}\nPA: {pa} | {ba_label}: {ba:.3f} | OPS: {ops:.3f} | HardHit%: {hard_hit_rate:.1%}"
 
 
 # --- 描画用関数 ---
@@ -258,6 +261,7 @@ def main():
     st.sidebar.subheader("👤 選手選択 (予測検索)")
     st.sidebar.caption("Last Name (姓) をローマ字で入力し、🔍ボタンで候補を表示してください。")
     
+    # --- 投手検索 ---
     col_p_search, col_p_btn = st.sidebar.columns([3, 1])
     with col_p_search: p_search = st.text_input("投手 姓 (例: darvish)", key="p_search")
     with col_p_btn: st.markdown("<br>", unsafe_allow_html=True); p_search_btn = st.button("🔍", key="p_search_btn", help="検索を実行")
@@ -270,6 +274,7 @@ def main():
     p_choice_label = st.sidebar.selectbox("候補 (P)", p_options, key="p_choice")
 
     
+    # --- 打者検索 ---
     col_b_search, col_b_btn = st.sidebar.columns([3, 1])
     with col_b_search: b_search = st.text_input("打者 姓 (例: ohtani)", key="b_search")
     with col_b_btn: st.markdown("<br>", unsafe_allow_html=True); b_search_btn = st.button("🔍", key="b_search_btn", help="検索を実行")
