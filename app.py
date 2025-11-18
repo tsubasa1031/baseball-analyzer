@@ -78,6 +78,7 @@ def get_statcast_data_safe(start_dt, end_dt, p_id, b_id, game_types_list):
         elif b_id:
             df = statcast_batter(start_dt=s_dt, end_dt=e_dt, player_id=b_id)
         else:
+            # リーグ全体 (時間がかかり、タイムアウトしやすい)
             df = statcast(start_dt=s_dt, end_dt=e_dt)
         
         # 試合タイプ絞り込み
@@ -103,18 +104,17 @@ def lookup_player_dynamic(key):
         return
 
     try:
-        # st.toast(f"Searching for: {last_name}", icon="🔍") # デバッグ用
+        # ここで外部APIにアクセス
         results = playerid_lookup(last_name.lower())
         if not results.empty:
             results['label'] = results['name_first'] + " " + results['name_last'] + " (" + results['mlb_played_first'].astype(str) + "-" + results['mlb_played_last'].astype(str) + ")"
-            # 必要なカラムのみ保持
             st.session_state[target_key] = results[['key_mlbam', 'label', 'name_first', 'name_last', 'position']].copy()
         else:
             st.session_state[target_key] = pd.DataFrame()
     except Exception as e:
         # 検索失敗してもアプリは落とさない
         st.session_state[target_key] = pd.DataFrame()
-        # st.error(f"検索エラー: {e}") # UIが乱れるため非表示
+        # print(f"Dynamic lookup error: {e}") # クラッシュ防止のためコンソールログも控える
 
 
 # ----------------------------------------------------------------------
@@ -211,8 +211,6 @@ def draw_5x5_grid(ax):
 
 def draw_batter(ax, stand):
     """打者画像またはシルエットを描画 (投手視点)"""
-    # batterL.png / batterR.png が存在しない可能性が高い環境に対応
-    
     if stand == 'R':
         base_x = -2.5 # 投手視点: 右打者は左側
     else:
@@ -254,6 +252,7 @@ def main():
     st.sidebar.caption("姓(Last Name)をローマ字で入力すると、下の選択肢が更新されます。")
     
     # --- 投手検索 ---
+    # on_changeでリアルタイム検索を実行
     p_search = st.sidebar.text_input("投手 姓 (例: darvish)", key="p_search", on_change=lookup_player_dynamic, args=('p_search',))
     
     p_options = ['指定なし']
@@ -263,6 +262,7 @@ def main():
 
     
     # --- 打者検索 ---
+    # on_changeでリアルタイム検索を実行
     b_search = st.sidebar.text_input("打者 姓 (例: ohtani)", key="b_search", on_change=lookup_player_dynamic, args=('b_search',))
     
     b_options = ['指定なし']
