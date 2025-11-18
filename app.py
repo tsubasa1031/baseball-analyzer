@@ -46,13 +46,19 @@ GAME_TYPE_MAP = {
 }
 
 # ----------------------------------------------------------------------
-# セッションステート初期化
+# セッションステート初期化関数 (main関数内で呼び出す)
 # ----------------------------------------------------------------------
-if 'raw_data' not in st.session_state:
-    st.session_state.raw_data = pd.DataFrame()
-    st.session_state.data_params = None 
-    st.session_state.p_lookup_results = pd.DataFrame() # 投手検索結果
-    st.session_state.b_lookup_results = pd.DataFrame() # 打者検索結果
+def initialize_session_state():
+    """必要なセッションステートを全て初期化する"""
+    if 'raw_data' not in st.session_state:
+        st.session_state.raw_data = pd.DataFrame()
+    if 'data_params' not in st.session_state:
+        st.session_state.data_params = None 
+    if 'p_lookup_results' not in st.session_state:
+        st.session_state.p_lookup_results = pd.DataFrame() # 投手検索結果
+    if 'b_lookup_results' not in st.session_state:
+        st.session_state.b_lookup_results = pd.DataFrame() # 打者検索結果
+
 
 # ----------------------------------------------------------------------
 # 1. データ取得関数
@@ -72,7 +78,7 @@ def get_statcast_data_safe(start_dt, end_dt, p_id, b_id, game_types_list):
         elif b_id:
             df = statcast_batter(start_dt=s_dt, end_dt=e_dt, player_id=b_id)
         else:
-            # リーグ全体
+            # リーグ全体 (時間がかかり、タイムアウトしやすい)
             df = statcast(start_dt=s_dt, end_dt=e_dt)
         
         # 試合タイプ絞り込み
@@ -147,7 +153,7 @@ def process_statcast_data(df_input):
     return df
 
 def get_metrics_summary(df, is_batter_focus, is_pitcher_focus):
-    if df.empty: return "データがありません"
+    if df.empty: return "#### データがありません"
     pa = df['is_pa_event'].sum(); ab = df['is_at_bat'].sum()
     h = df['is_hit'].sum();
     
@@ -159,13 +165,10 @@ def get_metrics_summary(df, is_batter_focus, is_pitcher_focus):
     
     # 動的メトリックタイトル
     if is_batter_focus and not is_pitcher_focus:
-        # 打者分析 (打率/OPS)
         main_metric_title = "打撃分析 (Batting)"
     elif is_pitcher_focus and not is_batter_focus:
-        # 投手分析 (被打率/被打OPS)
         main_metric_title = "投球分析 (Pitching)"
     else:
-        # 対戦またはリーグ全体
         main_metric_title = "集計分析 (Overall)"
 
     return f"#### {main_metric_title}\nPA: {pa} | BA: {ba:.3f} | OPS: {ops:.3f} | HardHit%: {hard_hit_rate:.1%}"
@@ -227,6 +230,10 @@ def draw_batter(ax, stand):
 # 3. メインアプリケーション
 # ----------------------------------------------------------------------
 def main():
+    # --- 初期化の呼び出し ---
+    initialize_session_state()
+    # -----------------------
+
     st.sidebar.title("⚾ MLB Analyzer Pro")
 
     # ==========================================
