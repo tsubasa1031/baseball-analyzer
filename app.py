@@ -52,7 +52,7 @@ if 'raw_data' not in st.session_state:
     st.session_state.data_params = None # 取得時のパラメータ (表示用)
 
 # ----------------------------------------------------------------------
-# 1. データ取得関数 (キャッシュデコレーターなし)
+# 1. データ取得関数
 # ----------------------------------------------------------------------
 def load_active_rosters_safe(year):
     """ロースター取得関数"""
@@ -108,8 +108,8 @@ def get_statcast_data_safe(start_dt, end_dt, p_id, b_id, game_types_list):
                 df = df[df['game_type'].isin(targets)]
         return df
     except Exception as e:
-        st.error(f"データ取得エラーが発生しました (期間を短くしてください): {e}")
-        return pd.DataFrame()
+        # このエラーはStreamlitの警告として表示されるため、ここでクラッシュはしない
+        raise e # 呼び出し元で再度キャッチさせる
 
 # ----------------------------------------------------------------------
 # 2. データ加工 & 描画補助関数
@@ -184,18 +184,17 @@ def draw_5x5_grid(ax):
     
     plate_width = 17/12
     ax.add_patch(patches.Polygon([(-plate_width/2, 0), (plate_width/2, 0), (plate_width/2, 0.2), (0, 0.4), (-plate_width/2, 0.2)], color='gray', alpha=0.5))
+    return x_lines, z_lines
 
 def draw_batter(ax, stand):
     """打者画像またはシルエットを描画 (捕手視点)"""
-    # 捕手視点での配置: 右打者(R)は右側(x > 0)、左打者(L)は左側(x < 0)
     img_file = 'batterR.png' if stand == 'R' else 'batterL.png'
     
-    # 座標設定 (捕手視点)
     if stand == 'R':
-        extent = [1.0, 4.0, 0, 6.0] # 右側
+        extent = [1.0, 4.0, 0, 6.0] # 右側 (RHB)
         base_x = 2.5
     else:
-        extent = [-4.0, -1.0, 0, 6.0] # 左側
+        extent = [-4.0, -1.0, 0, 6.0] # 左側 (LHB)
         base_x = -2.5
 
     loaded = False
@@ -269,6 +268,8 @@ def main():
     # B-2. 名前検索
     else:
         st.sidebar.info("Last Name (姓) を入力してください")
+        
+        # 投手
         p_search = st.sidebar.text_input("投手 姓 (例: darvish)", key="p_search")
         if p_search:
             try:
@@ -279,8 +280,10 @@ def main():
                     if p_choice != "指定なし":
                         row = found[found['label'] == p_choice].iloc[0]
                         selected_p_id, selected_p_name = int(row['key_mlbam']), f"{row['name_first']} {row['name_last']}"
+                else: st.sidebar.warning(f"投手 '{p_search}' の候補が見つかりませんでした。")
             except Exception as e: st.sidebar.error(f"検索エラー: {e}")
         
+        # 打者
         b_search = st.sidebar.text_input("打者 姓 (例: ohtani)", key="b_search")
         if b_search:
             try:
@@ -291,22 +294,33 @@ def main():
                     if b_choice != "指定なし":
                         row = found[found['label'] == b_choice].iloc[0]
                         selected_b_id, selected_b_name = int(row['key_mlbam']), f"{row['name_first']} {row['name_last']}"
+                else: st.sidebar.warning(f"打者 '{b_search}' の候補が見つかりませんでした。")
             except Exception as e: st.sidebar.error(f"検索エラー: {e}")
             
     # データ取得実行ボタン
     if st.sidebar.button("データ取得 (Get Data) 📥", type="primary", key="get_data_button"):
+        
+        if not selected_p_id and not selected_b_id and (end_date - start_date).days > 14:
+             if not st.warning(f"選手が指定されていません。期間({(end_date - start_date).days}日)が長すぎるため、タイムアウトする可能性が高いです。続行しますか？"):
+                 st.stop() # 警告後に続行しない場合は停止
+
         with st.spinner('データ取得中... (時間がかかります)'):
-            df_raw = get_statcast_data_safe(str(start_date), str(end_date), selected_p_id, selected_b_id, selected_game_types_code)
-            
-        if df_raw.empty:
-            st.session_state.raw_data = pd.DataFrame()
-            st.session_state.data_params = None
-            st.error("データが見つかりませんでした。条件を変更してください。")
-        else:
-            # 取得したデータをセッションステートに保存
-            st.session_state.raw_data = df_raw
-            st.session_state.data_params = (selected_p_name, selected_b_name, str(start_date), str(end_date), ", ".join(selected_game_types_label))
-            st.success(f"データ取得完了: {len(df_raw)} 球 (セッションに保存済)")
+            try:
+                df_raw = get_statcast_data_safe(str(start_date), str(end_date), selected_p_id, selected_b_id, selected_game_types_code)
+                
+                if df_raw.empty:
+                    st.session_state.raw_data = pd.DataFrame()
+                    st.session_state.data_params = None
+                    st.error("データが見つかりませんでした。条件を変更してください。")
+                else:
+                    # 取得したデータをセッションステートに保存
+                    st.session_state.raw_data = df_raw
+                    st.session_state.data_params = (selected_p_name, selected_b_name, str(start_date), str(end_date), ", ".join(selected_game_types_label))
+                    st.success(f"データ取得完了: {len(df_raw)} 球 (セッションに保存済)")
+            except Exception as e:
+                st.session_state.raw_data = pd.DataFrame()
+                st.session_state.data_params = None
+                st.error(f"データ取得中にエラーが発生しました。期間を短くしてください。: {e}")
 
 
     # ==========================================
@@ -385,7 +399,7 @@ def main():
                 fig, ax = plt.subplots(figsize=(8, 8))
                 
                 # 5x5グリッド & 打者画像 (捕手視点)
-                draw_5x5_grid(ax)
+                x_grid, z_grid = draw_5x5_grid(ax)
                 stand_draw = batter_stand if batter_stand != "All" else 'R' 
                 draw_batter(ax, stand_draw)
 
@@ -403,11 +417,6 @@ def main():
                 
                 # B. Grid Maps
                 else:
-                    grid_size = 5
-                    w = (0.708*2)/3; h = 2.0/3
-                    x_grid = [-0.708 - w, -0.708, -0.708 + w, -0.708 + 2*w, 0.708, 0.708 + w]
-                    z_grid = [1.5 - h, 1.5, 1.5 + h, 1.5 + 2*h, 3.5, 3.5 + h]
-                    
                     if analysis_type == 'ops': metric = 'OPS'; vmin, vmax = 0.4, 1.2; cmap = 'coolwarm'
                     elif analysis_type == 'ba': metric = 'AVG'; vmin, vmax = 0.1, 0.4; cmap = 'coolwarm'
                     elif analysis_type == 'woba': metric = 'wOBA'; vmin, vmax = 0.2, 0.5; cmap = 'coolwarm'
