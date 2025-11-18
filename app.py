@@ -55,10 +55,7 @@ def initialize_session_state():
     if 'data_params' not in st.session_state:
         # 7つの要素で初期化
         st.session_state.data_params = (None, None, None, None, None, False, False)
-    if 'p_lookup_results' not in st.session_state:
-        st.session_state.p_lookup_results = pd.DataFrame() # 投手検索結果
-    if 'b_lookup_results' not in st.session_state:
-        st.session_state.b_lookup_results = pd.DataFrame() # 打者検索結果
+
 
 # ----------------------------------------------------------------------
 # 1. データ取得関数
@@ -92,28 +89,6 @@ def get_statcast_data_safe(start_dt, end_dt, p_id, b_id, game_types_list):
         return df
     except Exception as e:
         raise e 
-
-# --- 選手ID検索ヘルパー (動的予測用) ---
-def lookup_player_dynamic(key):
-    """Text inputの内容が変更されたときに実行されるコールバック"""
-    last_name = st.session_state[key].strip()
-    target_key = f"{key}_results" # p_search_results or b_search_results
-
-    if not last_name:
-        st.session_state[target_key] = pd.DataFrame()
-        return
-
-    try:
-        # ここで外部APIにアクセス
-        results = playerid_lookup(last_name.lower())
-        if not results.empty:
-            results['label'] = results['name_first'] + " " + results['name_last'] + " (" + results['mlb_played_first'].astype(str) + "-" + results['mlb_played_last'].astype(str) + ")"
-            st.session_state[target_key] = results[['key_mlbam', 'label', 'name_first', 'name_last', 'position']].copy()
-        else:
-            st.session_state[target_key] = pd.DataFrame()
-    except Exception as e:
-        # 検索失敗してもアプリは落とさない
-        st.session_state[target_key] = pd.DataFrame()
 
 
 # ----------------------------------------------------------------------
@@ -227,6 +202,7 @@ def draw_batter(ax, stand):
     # 1. 画像ファイルの存在チェックと読み込み (GitHubに画像があれば表示)
     if os.path.exists(img_file):
         try:
+            # 投手視点では、Rの画像が左側に来るようにする
             img = mpimg.imread(img_file)
             ax.imshow(img, extent=extent, aspect='auto', zorder=0)
             loaded = True
@@ -267,40 +243,45 @@ def main():
     )
     selected_game_types_code = [GAME_TYPE_MAP[l] for l in selected_game_types_label]
 
-    # B. 選手選択 (予測検索)
-    st.sidebar.subheader("👤 選手選択 (予測検索)")
-    st.sidebar.caption("姓(Last Name)をローマ字で入力すると、下の選択肢が更新されます。")
+    # B. 選手選択 (名前検索)
+    st.sidebar.subheader("👤 選手選択 (名前検索)")
+    st.sidebar.caption("姓(Last Name)をローマ字で入力し、Enterまたはカーソルを外して確定してください。")
     
+    selected_p_id, selected_p_name = None, ""
+    selected_b_id, selected_b_name = None, ""
+
     # --- 投手検索 ---
-    # on_changeでリアルタイム検索を実行
-    p_search = st.sidebar.text_input("投手 姓 (例: darvish)", key="p_search", on_change=lookup_player_dynamic, args=('p_search',))
-    
-    p_options = ['指定なし']
-    if not st.session_state.p_lookup_results.empty:
-        p_options.extend(st.session_state.p_lookup_results['label'].tolist())
-    p_choice_label = st.sidebar.selectbox("候補 (P)", p_options, key="p_choice")
+    p_search = st.sidebar.text_input("投手 姓 (例: darvish)", key="p_search")
+    p_choice = ""
+    if p_search:
+        try:
+            found = playerid_lookup(p_search)
+            if not found.empty:
+                found['label'] = found['name_first'] + " " + found['name_last'] + " (" + found['mlb_played_first'].astype(str) + "-" + found['mlb_played_last'].astype(str) + ")"
+                p_choice = st.sidebar.selectbox("候補 (P)", ["指定なし"] + found['label'].tolist(), key="p_choice")
+                if p_choice != "指定なし":
+                    row = found[found['label'] == p_choice].iloc[0]
+                    selected_p_id, selected_p_name = int(row['key_mlbam']), f"{row['name_first']} {row['name_last']}"
+        except: 
+            st.sidebar.error("投手検索中にエラーが発生しました。")
 
-    
+
     # --- 打者検索 ---
-    # on_changeでリアルタイム検索を実行
-    b_search = st.sidebar.text_input("打者 姓 (例: ohtani)", key="b_search", on_change=lookup_player_dynamic, args=('b_search',))
-    
-    b_options = ['指定なし']
-    if not st.session_state.b_lookup_results.empty:
-        b_options.extend(st.session_state.b_lookup_results['label'].tolist())
-    b_choice_label = st.sidebar.selectbox("候補 (B)", b_options, key="b_choice")
-
-    
-    # 最終的なIDを特定
-    def get_selected_player(choice_label, results_df):
-        if choice_label == "指定なし" or results_df.empty: return None, ""
-        row = results_df[results_df['label'] == choice_label]
-        if row.empty: return None, ""
-        return int(row.iloc[0]['key_mlbam']), f"{row.iloc[0]['name_first']} {row.iloc[0]['name_last']}"
-
-    selected_p_id, selected_p_name = get_selected_player(p_choice_label, st.session_state.p_lookup_results)
-    selected_b_id, selected_b_name = get_selected_player(b_choice_label, st.session_state.b_lookup_results)
+    b_search = st.sidebar.text_input("打者 姓 (例: ohtani)", key="b_search")
+    b_choice = ""
+    if b_search:
+        try:
+            found = playerid_lookup(b_search)
+            if not found.empty:
+                found['label'] = found['name_first'] + " " + found['name_last'] + " (" + found['mlb_played_first'].astype(str) + "-" + found['mlb_played_last'].astype(str) + ")"
+                b_choice = st.sidebar.selectbox("候補 (B)", ["指定なし"] + found['label'].tolist(), key="b_choice")
+                if b_choice != "指定なし":
+                    row = found[found['label'] == b_choice].iloc[0]
+                    selected_b_id, selected_b_name = int(row['key_mlbam']), f"{row['name_first']} {row['name_last']}"
+        except:
+            st.sidebar.error("打者検索中にエラーが発生しました。")
             
+
     # データ取得実行ボタン
     if st.sidebar.button("データ取得 (Get Data) 📥", type="primary", key="get_data_button"):
         
