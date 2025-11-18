@@ -10,7 +10,7 @@ import matplotlib.cm as cm
 import matplotlib.image as mpimg
 import traceback
 import os
-import time # Time import added back for potential future use
+import time 
 
 # ----------------------------------------------------------------------
 # ページ設定
@@ -30,7 +30,8 @@ try:
     from pybaseball import statcast_pitcher, statcast_batter, playerid_lookup, statcast
     pybaseball.cache.enable()
 except ImportError as e:
-    st.error(f"ライブラリの読み込みに失敗しました: {e}")
+    # requirements.txtが不足している場合に表示されるエラー
+    st.error(f"ライブラリの読み込みに失敗しました。requirements.txtを更新してください。: {e}")
     st.stop()
 
 # ----------------------------------------------------------------------
@@ -49,10 +50,12 @@ GAME_TYPE_MAP = {
 # ----------------------------------------------------------------------
 if 'raw_data' not in st.session_state:
     st.session_state.raw_data = pd.DataFrame()
-    st.session_state.data_params = None # 取得時のパラメータ (表示用)
+    st.session_state.data_params = None 
+    st.session_state.p_lookup_results = pd.DataFrame() # 投手検索結果
+    st.session_state.b_lookup_results = pd.DataFrame() # 打者検索結果
 
 # ----------------------------------------------------------------------
-# 1. データ取得関数 (シンプル版)
+# 1. データ取得関数
 # ----------------------------------------------------------------------
 def get_statcast_data_safe(start_dt, end_dt, p_id, b_id, game_types_list):
     """Statcastデータの取得"""
@@ -69,7 +72,7 @@ def get_statcast_data_safe(start_dt, end_dt, p_id, b_id, game_types_list):
         elif b_id:
             df = statcast_batter(start_dt=s_dt, end_dt=e_dt, player_id=b_id)
         else:
-            # リーグ全体 (時間がかかり、タイムアウトしやすい)
+            # リーグ全体
             df = statcast(start_dt=s_dt, end_dt=e_dt)
         
         # 試合タイプ絞り込み
@@ -82,23 +85,25 @@ def get_statcast_data_safe(start_dt, end_dt, p_id, b_id, game_types_list):
                 df = df[df['game_type'].isin(targets)]
         return df
     except Exception as e:
-        # 呼び出し元でエラーを処理させる
         raise e 
 
-# --- 選手ID検索ヘルパー ---
-def find_player_id(last_name):
+# --- 選手ID検索ヘルパー (予測表示用) ---
+def lookup_and_cache(last_name, target_key):
+    """選手を検索し、結果をセッションに保存する"""
+    if not last_name.strip():
+        st.session_state[target_key] = pd.DataFrame()
+        return
+
     try:
-        found = playerid_lookup(last_name.lower().strip())
-        if not found.empty:
-            # 最初の候補を使用
-            row = found.iloc[0]
-            player_id = int(row['key_mlbam'])
-            player_name = f"{row['name_first']} {row['name_last']}"
-            return player_id, player_name
+        results = playerid_lookup(last_name.lower().strip())
+        if not results.empty:
+            results['label'] = results['name_first'] + " " + results['name_last'] + " (" + results['mlb_played_first'].astype(str) + "-" + results['mlb_played_last'].astype(str) + ")"
+            st.session_state[target_key] = results[['key_mlbam', 'label', 'name_first', 'name_last', 'position']]
+        else:
+            st.session_state[target_key] = pd.DataFrame()
     except Exception as e:
-        st.error(f"選手ID検索エラー ({last_name}): {e}")
-        return None, None
-    return None, None
+        st.error(f"選手検索中にエラーが発生しました。時間を置いて再試行してください。\n詳細: {e}")
+        st.session_state[target_key] = pd.DataFrame()
 
 
 # ----------------------------------------------------------------------
@@ -109,9 +114,9 @@ def process_statcast_data(df_input):
     df = df_input.copy()
     if 'game_date' in df.columns: df = df.sort_values('game_date').reset_index(drop=True)
 
-    cols_to_init = ['balls', 'strikes', 'outs_when_up', 'launch_speed', 'launch_angle', 'woba_value', 'plate_x', 'plate_z']
+    cols_to_init = ['balls', 'strikes', 'outs_when_up', 'launch_speed', 'launch_angle', 'woba_value', 'plate_x', 'plate_z', 'stand', 'p_throws']
     for c in cols_to_init:
-        if c not in df.columns: df[c] = 0 if c != 'woba_value' else np.nan
+        if c not in df.columns: df[c] = 0 if c not in ['woba_value', 'stand', 'p_throws'] else np.nan
 
     if 'events' in df.columns:
         events = df['events'].fillna('nan').str.lower()
@@ -141,13 +146,30 @@ def process_statcast_data(df_input):
 
     return df
 
-def get_metrics_summary(df):
-    if df.empty: return "No Data"
-    pa = df['is_pa_event'].sum(); ba = df['is_hit'].sum() / df['is_at_bat'].sum() if df['is_at_bat'].sum() > 0 else 0.0
+def get_metrics_summary(df, is_batter_focus, is_pitcher_focus):
+    if df.empty: return "データがありません"
+    pa = df['is_pa_event'].sum(); ab = df['is_at_bat'].sum()
+    h = df['is_hit'].sum();
+    
+    ba = h / ab if ab > 0 else 0.0
     obp = df['is_on_base'].sum() / df['is_obp_denom'].sum() if df['is_obp_denom'].sum() > 0 else 0.0
-    slg = df['slugging_base'].sum() / df['is_at_bat'].sum() if df['is_at_bat'].sum() > 0 else 0.0
+    slg = df['slugging_base'].sum() / ab if ab > 0 else 0.0
     ops = obp + slg
-    return f"PA: {pa} | BA: {ba:.3f} | OPS: {ops:.3f} | HardHit%: {df['is_hard_hit'].mean():.1%}"
+    hard_hit_rate = df['is_hard_hit'].mean()
+    
+    # 動的メトリックタイトル
+    if is_batter_focus and not is_pitcher_focus:
+        # 打者分析 (打率/OPS)
+        main_metric_title = "打撃分析 (Batting)"
+    elif is_pitcher_focus and not is_batter_focus:
+        # 投手分析 (被打率/被打OPS)
+        main_metric_title = "投球分析 (Pitching)"
+    else:
+        # 対戦またはリーグ全体
+        main_metric_title = "集計分析 (Overall)"
+
+    return f"#### {main_metric_title}\nPA: {pa} | BA: {ba:.3f} | OPS: {ops:.3f} | HardHit%: {hard_hit_rate:.1%}"
+
 
 # --- 描画用関数 ---
 def draw_5x5_grid(ax):
@@ -180,6 +202,7 @@ def draw_batter(ax, stand):
     """打者画像またはシルエットを描画 (投手視点)"""
     img_file = 'batterR.png' if stand == 'R' else 'batterL.png'
     
+    # 投手視点: 右打者(R)は左側、左打者(L)は右側
     if stand == 'R':
         extent = [-4.0, -1.0, 0, 6.0] 
         base_x = -2.5
@@ -209,7 +232,7 @@ def main():
     # ==========================================
     # STEP 1: データ取得
     # ==========================================
-    st.sidebar.markdown("### STEP 1: データ取得 (重い処理)")
+    st.sidebar.markdown("### STEP 1: データ取得 (名前検索と期間)")
     
     # A. 期間
     col_d1, col_d2 = st.sidebar.columns(2)
@@ -222,35 +245,52 @@ def main():
     )
     selected_game_types_code = [GAME_TYPE_MAP[l] for l in selected_game_types_label]
 
-    # B. 選手選択 (名前検索のみ)
-    st.sidebar.subheader("👤 選手選択 (名前検索)")
-    st.sidebar.caption("Last Name (姓) をローマ字入力してください。完全一致検索を行います。")
+    # B. 選手選択 (名前検索と予測結果)
+    st.sidebar.subheader("👤 選手選択 (予測検索)")
+    st.sidebar.caption("Last Name (姓) をローマ字で入力し、🔍ボタンで候補を表示してください。")
     
-    p_search = st.sidebar.text_input("投手 姓 (例: darvish)", key="p_search")
-    b_search = st.sidebar.text_input("打者 姓 (例: ohtani)", key="b_search")
+    col_p_search, col_p_btn = st.sidebar.columns([3, 1])
+    with col_p_search: p_search = st.text_input("投手 姓 (例: darvish)", key="p_search")
+    with col_p_btn: st.markdown("<br>", unsafe_allow_html=True); p_search_btn = st.button("🔍", key="p_search_btn", help="検索を実行")
+    
+    if p_search_btn: lookup_and_cache(p_search, 'p_lookup_results')
+    
+    p_options = ['指定なし']
+    if not st.session_state.p_lookup_results.empty:
+        p_options.extend(st.session_state.p_lookup_results['label'].tolist())
+    p_choice_label = st.sidebar.selectbox("候補 (P)", p_options, key="p_choice")
+
+    
+    col_b_search, col_b_btn = st.sidebar.columns([3, 1])
+    with col_b_search: b_search = st.text_input("打者 姓 (例: ohtani)", key="b_search")
+    with col_b_btn: st.markdown("<br>", unsafe_allow_html=True); b_search_btn = st.button("🔍", key="b_search_btn", help="検索を実行")
+    
+    if b_search_btn: lookup_and_cache(b_search, 'b_lookup_results')
+
+    b_options = ['指定なし']
+    if not st.session_state.b_lookup_results.empty:
+        b_options.extend(st.session_state.b_lookup_results['label'].tolist())
+    b_choice_label = st.sidebar.selectbox("候補 (B)", b_options, key="b_choice")
+
+    
+    # 最終的なIDを特定
+    def get_selected_player(choice_label, results_df):
+        if choice_label == "指定なし" or results_df.empty: return None, ""
+        row = results_df[results_df['label'] == choice_label].iloc[0]
+        return int(row['key_mlbam']), f"{row['name_first']} {row['name_last']}"
+
+    selected_p_id, selected_p_name = get_selected_player(p_choice_label, st.session_state.p_lookup_results)
+    selected_b_id, selected_b_name = get_selected_player(b_choice_label, st.session_state.b_lookup_results)
             
     # データ取得実行ボタン
     if st.sidebar.button("データ取得 (Get Data) 📥", type="primary", key="get_data_button"):
         
-        # 内部で選手IDを特定 (選手ID検索はボタン内に閉じ込める)
-        selected_p_id, selected_p_name = None, ""
-        selected_b_id, selected_b_name = None, ""
-
-        if p_search.strip():
-            selected_p_id, selected_p_name = find_player_id(p_search)
-        
-        if b_search.strip():
-            selected_b_id, selected_b_name = find_player_id(b_search)
-
+        if not selected_p_id and not selected_b_id:
+            st.warning("選手が指定されていません。リーグ全体のデータを取得します。")
+            
         if not selected_p_id and not selected_b_id and (end_date - start_date).days > 14:
              st.warning(f"選手が指定されていません。期間({(end_date - start_date).days}日)が長すぎるため、タイムアウトする可能性が高いです。続行します。")
         
-        if (p_search.strip() and not selected_p_id) or (b_search.strip() and not selected_b_id):
-            st.error("入力された選手名が見つかりませんでした。スペルを確認してください。")
-        
-        if not p_search.strip() and not b_search.strip():
-            st.warning("選手が指定されていません。リーグ全体のデータを取得します。")
-
         # Statcastデータ取得
         with st.spinner('データ取得中... (時間がかかります)'):
             try:
@@ -261,14 +301,13 @@ def main():
                     st.session_state.data_params = None
                     st.error("データが見つかりませんでした。条件を変更してください。")
                 else:
-                    # 取得したデータをセッションステートに保存
                     st.session_state.raw_data = df_raw
-                    st.session_state.data_params = (selected_p_name, selected_b_name, str(start_date), str(end_date), ", ".join(selected_game_types_label))
-                    st.success(f"データ取得完了: {len(df_raw)} 球 (セッションに保存済)")
+                    st.session_state.data_params = (selected_p_name, selected_b_name, str(start_date), str(end_date), ", ".join(selected_game_types_label), selected_p_id is not None, selected_b_id is not None)
+                    st.success(f"データ取得完了: {len(df_raw)} 球")
             except Exception as e:
                 st.session_state.raw_data = pd.DataFrame()
                 st.session_state.data_params = None
-                st.error(f"データ取得中にエラーが発生しました。期間を短くしてください。\n詳細: {e}")
+                st.error(f"データ取得中にエラーが発生しました。\n詳細: {e}")
 
 
     # ==========================================
@@ -281,7 +320,7 @@ def main():
         st.info("データがありません。STEP 1でデータを取得してください。")
     else:
         # 取得パラメータの表示
-        p_name, b_name, s_date, e_date, g_types = st.session_state.data_params
+        p_name, b_name, s_date, e_date, g_types, is_p_focus, is_b_focus = st.session_state.data_params
         
         # タイトル
         title_str = "League Wide"
@@ -408,7 +447,7 @@ def main():
 
             with col_res2:
                 st.markdown("### Summary")
-                st.info(get_metrics_summary(df_filtered))
+                st.info(get_metrics_summary(df_filtered, is_b_focus, is_p_focus))
                 st.dataframe(df_filtered[['game_date', 'events', 'description', 'pitch_type', 'launch_speed']].head(20))
 
 if __name__ == "__main__":
