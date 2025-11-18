@@ -90,27 +90,26 @@ def get_statcast_data_safe(start_dt, end_dt, p_id, b_id, game_types_list):
     except Exception as e:
         raise e 
 
-# --- 選手ID検索ヘルパー (動的予測用) ---
-def lookup_player_dynamic(key):
-    """Text inputの内容が変更されたときに実行されるコールバック"""
-    last_name = st.session_state[key].strip()
-    target_key = f"{key}_results" # p_search_results or b_search_results
-
-    if not last_name:
+# --- 選手ID検索ヘルパー (明示的なボタン操作で実行) ---
+def lookup_and_cache(last_name, target_key):
+    """選手を検索し、結果をセッションに保存する (ボタンコールバック用)"""
+    if not last_name.strip():
         st.session_state[target_key] = pd.DataFrame()
         return
 
     try:
-        results = playerid_lookup(last_name.lower())
+        # 大文字小文字はplayerid_lookupが自動で処理するが、念のためlower()
+        results = playerid_lookup(last_name.lower().strip())
         if not results.empty:
             results['label'] = results['name_first'] + " " + results['name_last'] + " (" + results['mlb_played_first'].astype(str) + "-" + results['mlb_played_last'].astype(str) + ")"
             st.session_state[target_key] = results[['key_mlbam', 'label', 'name_first', 'name_last', 'position']].copy()
+            st.toast(f"'{last_name}' の候補 {len(results)} 件が見つかりました。", icon='✅')
         else:
             st.session_state[target_key] = pd.DataFrame()
+            st.toast(f"'{last_name}' の候補は見つかりませんでした。", icon='❌')
     except Exception as e:
-        # ネットワークエラーなどで検索失敗しても、アプリは落とさない
+        st.error(f"選手検索中にエラーが発生しました。時間を置いて再試行してください。\n詳細: {e}")
         st.session_state[target_key] = pd.DataFrame()
-        print(f"Dynamic lookup error: {e}")
 
 
 # ----------------------------------------------------------------------
@@ -258,10 +257,14 @@ def main():
 
     # B. 選手選択 (名前検索と予測結果)
     st.sidebar.subheader("👤 選手選択 (予測検索)")
-    st.sidebar.caption("Last Name (姓) をローマ字で入力すると、下の選択肢が更新されます。")
+    st.sidebar.caption("姓を入力後、必ず隣の🔍ボタンを押して候補を選択してください。")
     
     # --- 投手検索 ---
-    p_search = st.sidebar.text_input("投手 姓 (例: darvish)", key="p_search", on_change=lookup_player_dynamic, args=('p_search',))
+    col_p_search, col_p_btn = st.sidebar.columns([3, 1])
+    with col_p_search: p_search = st.text_input("投手 姓 (例: darvish)", key="p_search")
+    with col_p_btn: st.markdown("<br>", unsafe_allow_html=True); p_search_btn = st.button("🔍 検索", key="p_search_btn")
+    
+    if p_search_btn: lookup_and_cache(p_search, 'p_lookup_results')
     
     p_options = ['指定なし']
     if not st.session_state.p_lookup_results.empty:
@@ -270,8 +273,12 @@ def main():
 
     
     # --- 打者検索 ---
-    b_search = st.sidebar.text_input("打者 姓 (例: ohtani)", key="b_search", on_change=lookup_player_dynamic, args=('b_search',))
+    col_b_search, col_b_btn = st.sidebar.columns([3, 1])
+    with col_b_search: b_search = st.text_input("打者 姓 (例: ohtani)", key="b_search")
+    with col_b_btn: st.markdown("<br>", unsafe_allow_html=True); b_search_btn = st.button("🔍 検索", key="b_search_btn")
     
+    if b_search_btn: lookup_and_cache(b_search, 'b_lookup_results')
+
     b_options = ['指定なし']
     if not st.session_state.b_lookup_results.empty:
         b_options.extend(st.session_state.b_lookup_results['label'].tolist())
