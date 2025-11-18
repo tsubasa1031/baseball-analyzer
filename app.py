@@ -57,8 +57,9 @@ def load_active_rosters(year):
 
     roster = fetch_year(year)
     if roster.empty:
-        st.toast(f"{year}年のリスト取得に失敗したため、{year-1}年のデータを参照します。", icon="⚠️")
+        # st.toast はキャッシュエラーの原因になるため削除し、サイレントに前年へフォールバック
         roster = fetch_year(year - 1)
+    
     return roster.drop_duplicates(subset=['mlbID'], keep='first') if not roster.empty else roster
 
 @st.cache_data(ttl=3600)
