@@ -30,7 +30,6 @@ try:
     from pybaseball import statcast_pitcher, statcast_batter, playerid_lookup, statcast
     pybaseball.cache.enable()
 except ImportError as e:
-    # requirements.txtが不足している場合に表示されるエラー
     st.error(f"ライブラリの読み込みに失敗しました。requirements.txtを更新してください。: {e}")
     st.stop()
 
@@ -53,13 +52,11 @@ def initialize_session_state():
     if 'raw_data' not in st.session_state:
         st.session_state.raw_data = pd.DataFrame()
     if 'data_params' not in st.session_state:
-        # 7つの要素で初期化
         st.session_state.data_params = (None, None, None, None, None, False, False)
     if 'p_lookup_results' not in st.session_state:
         st.session_state.p_lookup_results = pd.DataFrame() # 投手検索結果
     if 'b_lookup_results' not in st.session_state:
         st.session_state.b_lookup_results = pd.DataFrame() # 打者検索結果
-
 
 # ----------------------------------------------------------------------
 # 1. データ取得関数
@@ -79,7 +76,6 @@ def get_statcast_data_safe(start_dt, end_dt, p_id, b_id, game_types_list):
         elif b_id:
             df = statcast_batter(start_dt=s_dt, end_dt=e_dt, player_id=b_id)
         else:
-            # リーグ全体 (時間がかかり、タイムアウトしやすい)
             df = statcast(start_dt=s_dt, end_dt=e_dt)
         
         # 試合タイプ絞り込み
@@ -94,24 +90,27 @@ def get_statcast_data_safe(start_dt, end_dt, p_id, b_id, game_types_list):
     except Exception as e:
         raise e 
 
-# --- 選手ID検索ヘルパー (予測表示用) ---
-def lookup_and_cache(last_name, target_key):
-    """選手を検索し、結果をセッションに保存する"""
-    if not last_name.strip():
+# --- 選手ID検索ヘルパー (動的予測用) ---
+def lookup_player_dynamic(key):
+    """Text inputの内容が変更されたときに実行されるコールバック"""
+    last_name = st.session_state[key].strip()
+    target_key = f"{key}_results" # p_search_results or b_search_results
+
+    if not last_name:
         st.session_state[target_key] = pd.DataFrame()
         return
 
     try:
-        results = playerid_lookup(last_name.lower().strip())
+        results = playerid_lookup(last_name.lower())
         if not results.empty:
             results['label'] = results['name_first'] + " " + results['name_last'] + " (" + results['mlb_played_first'].astype(str) + "-" + results['mlb_played_last'].astype(str) + ")"
-            # 必要なカラムのみ保持
             st.session_state[target_key] = results[['key_mlbam', 'label', 'name_first', 'name_last', 'position']].copy()
         else:
             st.session_state[target_key] = pd.DataFrame()
     except Exception as e:
-        st.error(f"選手検索中にエラーが発生しました。時間を置いて再試行してください。\n詳細: {e}")
+        # ネットワークエラーなどで検索失敗しても、アプリは落とさない
         st.session_state[target_key] = pd.DataFrame()
+        print(f"Dynamic lookup error: {e}")
 
 
 # ----------------------------------------------------------------------
@@ -244,7 +243,7 @@ def main():
     # ==========================================
     # STEP 1: データ取得
     # ==========================================
-    st.sidebar.markdown("### STEP 1: データ取得 (名前検索と期間)")
+    st.sidebar.markdown("### STEP 1: データ取得 (重い処理)")
     
     # A. 期間
     col_d1, col_d2 = st.sidebar.columns(2)
@@ -259,14 +258,10 @@ def main():
 
     # B. 選手選択 (名前検索と予測結果)
     st.sidebar.subheader("👤 選手選択 (予測検索)")
-    st.sidebar.caption("Last Name (姓) をローマ字で入力し、🔍ボタンで候補を表示してください。")
+    st.sidebar.caption("Last Name (姓) をローマ字で入力すると、下の選択肢が更新されます。")
     
     # --- 投手検索 ---
-    col_p_search, col_p_btn = st.sidebar.columns([3, 1])
-    with col_p_search: p_search = st.text_input("投手 姓 (例: darvish)", key="p_search")
-    with col_p_btn: st.markdown("<br>", unsafe_allow_html=True); p_search_btn = st.button("🔍", key="p_search_btn", help="検索を実行")
-    
-    if p_search_btn: lookup_and_cache(p_search, 'p_lookup_results')
+    p_search = st.sidebar.text_input("投手 姓 (例: darvish)", key="p_search", on_change=lookup_player_dynamic, args=('p_search',))
     
     p_options = ['指定なし']
     if not st.session_state.p_lookup_results.empty:
@@ -275,12 +270,8 @@ def main():
 
     
     # --- 打者検索 ---
-    col_b_search, col_b_btn = st.sidebar.columns([3, 1])
-    with col_b_search: b_search = st.text_input("打者 姓 (例: ohtani)", key="b_search")
-    with col_b_btn: st.markdown("<br>", unsafe_allow_html=True); b_search_btn = st.button("🔍", key="b_search_btn", help="検索を実行")
+    b_search = st.sidebar.text_input("打者 姓 (例: ohtani)", key="b_search", on_change=lookup_player_dynamic, args=('b_search',))
     
-    if b_search_btn: lookup_and_cache(b_search, 'b_lookup_results')
-
     b_options = ['指定なし']
     if not st.session_state.b_lookup_results.empty:
         b_options.extend(st.session_state.b_lookup_results['label'].tolist())
@@ -290,8 +281,9 @@ def main():
     # 最終的なIDを特定
     def get_selected_player(choice_label, results_df):
         if choice_label == "指定なし" or results_df.empty: return None, ""
-        row = results_df[results_df['label'] == choice_label].iloc[0]
-        return int(row['key_mlbam']), f"{row['name_first']} {row['name_last']}"
+        row = results_df[results_df['label'] == choice_label]
+        if row.empty: return None, ""
+        return int(row.iloc[0]['key_mlbam']), f"{row.iloc[0]['name_first']} {row.iloc[0]['name_last']}"
 
     selected_p_id, selected_p_name = get_selected_player(p_choice_label, st.session_state.p_lookup_results)
     selected_b_id, selected_b_name = get_selected_player(b_choice_label, st.session_state.b_lookup_results)
@@ -312,11 +304,9 @@ def main():
                 
                 if df_raw.empty:
                     st.session_state.raw_data = pd.DataFrame()
-                    # 7つの要素を初期化
                     st.session_state.data_params = (None, None, None, None, None, False, False)
                     st.error("データが見つかりませんでした。条件を変更してください。")
                 else:
-                    # 7つの要素で保存 (修正箇所)
                     is_p_focus = selected_p_id is not None
                     is_b_focus = selected_b_id is not None
                     st.session_state.raw_data = df_raw
@@ -324,7 +314,6 @@ def main():
                     st.success(f"データ取得完了: {len(df_raw)} 球")
             except Exception as e:
                 st.session_state.raw_data = pd.DataFrame()
-                # 7つの要素を初期化
                 st.session_state.data_params = (None, None, None, None, None, False, False)
                 st.error(f"データ取得中にエラーが発生しました。\n詳細: {e}")
 
@@ -338,7 +327,6 @@ def main():
     if st.session_state.raw_data.empty:
         st.info("データがありません。STEP 1でデータを取得してください。")
     else:
-        # 7つの要素を取り出す (ValueError解消)
         p_name, b_name, s_date, e_date, g_types, is_p_focus, is_b_focus = st.session_state.data_params
         
         # タイトル
