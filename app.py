@@ -10,10 +10,9 @@ import matplotlib.cm as cm
 import matplotlib.image as mpimg
 import traceback
 import os
-import time 
 
 # ----------------------------------------------------------------------
-# ページ設定
+# ページ設定 (必ず最初に書く)
 # ----------------------------------------------------------------------
 st.set_page_config(
     page_title="⚾ MLB Analyzer Pro",
@@ -23,14 +22,18 @@ st.set_page_config(
 )
 
 # ----------------------------------------------------------------------
-# ライブラリ読み込み
+# ライブラリ読み込み & 初期化
 # ----------------------------------------------------------------------
 try:
     import pybaseball
     from pybaseball import statcast_pitcher, statcast_batter, playerid_lookup, statcast
-    pybaseball.cache.enable()
+    # キャッシュ有効化（失敗しても続行するよう防御）
+    try:
+        pybaseball.cache.enable()
+    except:
+        pass
 except ImportError as e:
-    st.error(f"ライブラリの読み込みに失敗しました。requirements.txtを更新してください。: {e}")
+    st.error(f"ライブラリの読み込みに失敗しました。requirements.txtを確認してください: {e}")
     st.stop()
 
 # ----------------------------------------------------------------------
@@ -54,16 +57,15 @@ if 'data_params' not in st.session_state:
     st.session_state.data_params = (None, None, None, None, None, False, False)
 
 # ----------------------------------------------------------------------
-# 1. データ取得・検索関数 (キャッシュ付き)
+# 1. ヘルパー関数 (キャッシュ活用)
 # ----------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
-def search_player_cached(name_str):
-    """選手名検索をキャッシュして高速化・安定化"""
+def search_player(name_str):
+    """選手名検索をキャッシュして高速化"""
     if not name_str:
         return pd.DataFrame()
     try:
-        # last_name, first_name の指定はせず、文字列全体で検索
         return playerid_lookup(name_str.lower().strip())
     except:
         return pd.DataFrame()
@@ -77,11 +79,15 @@ def get_statcast_data_safe(start_dt, end_dt, p_id, b_id, game_types_list):
         df = pd.DataFrame()
 
         if p_id and b_id:
+            # 対戦
             raw = statcast_pitcher(start_dt=s_dt, end_dt=e_dt, player_id=p_id)
-            if not raw.empty and 'batter' in raw.columns: df = raw[raw['batter'] == b_id].copy()
+            if not raw.empty and 'batter' in raw.columns:
+                df = raw[raw['batter'] == b_id].copy()
         elif p_id:
+            # 投手のみ
             df = statcast_pitcher(start_dt=s_dt, end_dt=e_dt, player_id=p_id)
         elif b_id:
+            # 打者のみ
             df = statcast_batter(start_dt=s_dt, end_dt=e_dt, player_id=b_id)
         else:
             # リーグ全体
@@ -115,19 +121,24 @@ def process_statcast_data(df_input):
         events = df['events'].fillna('nan').str.lower()
         hits = ['single', 'double', 'triple', 'home_run']
         df['is_hit'] = events.isin(hits).astype(int)
+        
         ab_events = hits + ['field_out', 'strikeout', 'grounded_into_double_play', 'double_play', 'fielders_choice', 'force_out']
         df['is_at_bat'] = events.isin(ab_events).astype(int)
+        
         pa_events = ab_events + ['walk', 'hit_by_pitch', 'sac_fly']
         df['is_pa_event'] = events.isin(pa_events).astype(int)
+        
         tb_map = {'single': 1, 'double': 2, 'triple': 3, 'home_run': 4}
         df['slugging_base'] = events.map(tb_map).fillna(0).astype(int)
+        
         df['is_obp_denom'] = (df['is_at_bat'] | events.isin(['walk', 'hit_by_pitch', 'sac_fly'])).astype(int)
         df['is_on_base'] = (df['is_hit'] | events.isin(['walk', 'hit_by_pitch'])).astype(int)
-        df['is_batted_ball'] = df['type'] == 'X'
     else:
-        df['is_hit'] = 0; df['is_at_bat'] = 0; df['is_pa_event'] = 0; df['slugging_base'] = 0; df['is_batted_ball'] = 0
+        df['is_hit'] = 0; df['is_at_bat'] = 0; df['is_pa_event'] = 0; df['slugging_base'] = 0
 
     df['is_hard_hit'] = (df['launch_speed'].fillna(0) >= 95.0).astype(int)
+    
+    # Barrel簡易計算
     ls = df['launch_speed'].fillna(0); la = df['launch_angle'].fillna(0)
     cond = (ls >= 98) & (la >= 26) & (la <= 30)
     df['is_barrel'] = np.where(cond, 1, 0)
@@ -141,28 +152,31 @@ def process_statcast_data(df_input):
 
 def get_metrics_summary(df, is_batter_focus, is_pitcher_focus):
     if df.empty: return "#### データがありません"
-    pa = df['is_pa_event'].sum(); ab = df['is_at_bat'].sum()
-    h = df['is_hit'].sum();
+    
+    pa = df['is_pa_event'].sum()
+    ab = df['is_at_bat'].sum()
+    h = df['is_hit'].sum()
     
     ba = h / ab if ab > 0 else 0.0
-    obp = df['is_on_base'].sum() / df['is_obp_denom'].sum() if df['is_obp_denom'].sum() > 0 else 0.0
+    obp_denom = df['is_obp_denom'].sum()
+    obp = df['is_on_base'].sum() / obp_denom if obp_denom > 0 else 0.0
     slg = df['slugging_base'].sum() / ab if ab > 0 else 0.0
     ops = obp + slg
     hard_hit_rate = df['is_hard_hit'].mean()
     
-    if is_batter_focus and not is_pitcher_focus:
-        main_metric_title = "打撃分析 (Batting)"
-        ba_label = "BA"
-    elif is_pitcher_focus and not is_batter_focus:
-        main_metric_title = "投球分析 (Pitching)"
-        ba_label = "BA Against (被打率)"
+    # 動的ラベル切り替え
+    if is_pitcher_focus and not is_batter_focus:
+        # 投手のみ選択時 -> 被打率
+        label_ba = "BA Against (被打率)"
+        title = "Pitching Stats"
     else:
-        main_metric_title = "集計分析 (Overall)"
-        ba_label = "BA / BA Against"
+        # 打者選択時 or 両方 or なし -> 打率
+        label_ba = "Batting Avg (打率)"
+        title = "Batting Stats"
 
-    return f"#### {main_metric_title}\nPA: {pa} | {ba_label}: {ba:.3f} | OPS: {ops:.3f} | HardHit%: {hard_hit_rate:.1%}"
+    return f"#### {title}\nPA: {pa} | {label_ba}: {ba:.3f} | OPS: {ops:.3f} | HardHit%: {hard_hit_rate:.1%}"
 
-# --- 描画用関数 ---
+# --- 描画 ---
 def draw_5x5_grid(ax):
     sz_left, sz_right = -0.708, 0.708
     sz_bot, sz_top = 1.5, 3.5
@@ -181,10 +195,6 @@ def draw_5x5_grid(ax):
         props = zone_props if i in [1, 4] else line_props
         ax.plot([x_lines[0], x_lines[5]], [z, z], **props)
 
-    rect = patches.Rectangle((sz_left, sz_bot), sz_right-sz_left, sz_top-sz_bot, fill=False, edgecolor='blue', linewidth=2)
-    ax.add_patch(rect)
-    plate_width = 17/12
-    ax.add_patch(patches.Polygon([(-plate_width/2, 0), (plate_width/2, 0), (plate_width/2, 0.2), (0, 0.4), (-plate_width/2, 0.2)], color='gray', alpha=0.5))
     return x_lines, z_lines
 
 def draw_batter(ax, stand):
@@ -209,15 +219,12 @@ def draw_batter(ax, stand):
         ax.add_patch(patches.Ellipse((base_x, 3.0), 1.5, 5.5, color='gray', alpha=0.5, zorder=0))
         ax.add_patch(patches.Circle((base_x, 5.5), 0.4, color='gray', alpha=0.5, zorder=0))
 
+
 # ----------------------------------------------------------------------
 # 3. メインアプリケーション
 # ----------------------------------------------------------------------
 def main():
     st.sidebar.title("⚾ MLB Analyzer Pro")
-
-    # セッションステート初期化
-    if 'raw_data' not in st.session_state: st.session_state.raw_data = pd.DataFrame()
-    if 'data_params' not in st.session_state: st.session_state.data_params = (None, None, None, None, None, False, False)
 
     # A. 期間
     st.sidebar.markdown("### STEP 1: データ取得")
@@ -231,17 +238,18 @@ def main():
     )
     selected_game_types_code = [GAME_TYPE_MAP[l] for l in selected_game_types_label]
 
-    # B. 選手選択 (指定のシンプルロジックを採用)
+    # B. 選手選択
     st.sidebar.subheader("👤 選手選択 (名前検索)")
     st.sidebar.caption("姓(Last Name)を入力し、Enterまたはカーソルを外して確定してください。")
-    
+
     selected_p_id, selected_p_name = None, ""
     selected_b_id, selected_b_name = None, ""
 
     # --- 投手検索 ---
     p_search = st.sidebar.text_input("投手 姓 (例: darvish)", key="p_input")
     if p_search:
-        found = search_player_cached(p_search) # キャッシュ関数を使用
+        # キャッシュされた検索関数を呼び出し
+        found = search_player(p_search)
         if not found.empty:
             found['label'] = found['name_first'] + " " + found['name_last'] + " (" + found['mlb_played_first'].astype(str) + "-" + found['mlb_played_last'].astype(str) + ")"
             p_choice = st.sidebar.selectbox("候補 (P)", ["指定なし"] + found['label'].tolist(), key="p_box")
@@ -254,7 +262,7 @@ def main():
     # --- 打者検索 ---
     b_search = st.sidebar.text_input("打者 姓 (例: ohtani)", key="b_input")
     if b_search:
-        found = search_player_cached(b_search) # キャッシュ関数を使用
+        found = search_player(b_search)
         if not found.empty:
             found['label'] = found['name_first'] + " " + found['name_last'] + " (" + found['mlb_played_first'].astype(str) + "-" + found['mlb_played_last'].astype(str) + ")"
             b_choice = st.sidebar.selectbox("候補 (B)", ["指定なし"] + found['label'].tolist(), key="b_box")
@@ -267,9 +275,6 @@ def main():
     # データ取得ボタン
     if st.sidebar.button("データ取得 (Get Data) 📥", type="primary"):
         
-        if not selected_p_id and not selected_b_id:
-            st.warning("選手が指定されていません。リーグ全体のデータを取得します。")
-            
         if not selected_p_id and not selected_b_id and (end_date - start_date).days > 14:
              st.warning("期間が長すぎるため、リーグ全体の取得はタイムアウトする可能性があります。")
 
@@ -278,13 +283,14 @@ def main():
             
             if df_raw.empty:
                 st.session_state.raw_data = pd.DataFrame()
+                # 7要素で初期化
                 st.session_state.data_params = (None, None, None, None, None, False, False)
                 st.error("データが見つかりませんでした。")
             else:
                 is_p = selected_p_id is not None
                 is_b = selected_b_id is not None
                 st.session_state.raw_data = df_raw
-                # 7つの要素をタプルとして保存
+                # 7要素で保存 (修正済み)
                 st.session_state.data_params = (selected_p_name, selected_b_name, str(start_date), str(end_date), ", ".join(selected_game_types_label), is_p, is_b)
                 st.success(f"完了: {len(df_raw)} 球")
 
@@ -298,7 +304,7 @@ def main():
     if st.session_state.raw_data.empty:
         st.info("データがありません。STEP 1を実行してください。")
     else:
-        # ここで7つの要素を展開
+        # 要素展開 (ValueError対策済み)
         p_name, b_name, s_date, e_date, g_types, is_p_focus, is_b_focus = st.session_state.data_params
         
         title_str = "League Wide"
@@ -322,7 +328,7 @@ def main():
             target_result = st.selectbox("結果", ['', 'strikeout', 'walk', 'single', 'double', 'triple', 'home_run', 'hit_into_play', 'woba_zero'])
 
         ANALYSIS_OPTIONS = {
-            'Density (投球分布)': 'density', 'OPS Map': 'ops', 'Batting Avg': 'ba',
+            'Density (投球分布)': 'density', 'OPS Map': 'ops', 'Batting Avg / Against': 'ba',
             'wOBA': 'woba', 'Hard Hit%': 'hard_hit', 'Barrel%': 'barrel'
         }
         analysis_label = st.sidebar.selectbox("📊 分析タイプ", list(ANALYSIS_OPTIONS.keys()))
@@ -398,10 +404,12 @@ def main():
                                     ax.text((x1+x2)/2, (z1+z2)/2, f"{val:{fmt}}\n({len(sub)})", ha='center', va='center', fontsize=7, color=col)
                     plt.colorbar(m, ax=ax, label=metric)
 
-                ax.set_xlim(-2.5, 2.5) # 投手視点
+                # 投手視点: 左側マイナス(RHB)、右側プラス(LHB)
+                ax.set_xlim(-2.5, 2.5)
                 ax.set_ylim(0, 6.0)
                 ax.set_aspect('equal')
-                ax.set_xlabel("Pitcher's View")
+                ax.set_xlabel("Pitcher's View (Left=RHB, Right=LHB)")
+                ax.set_title(f"{analysis_type.upper()} Map (Pitcher's View)")
                 st.pyplot(fig)
 
             with col_res2:
