@@ -45,6 +45,15 @@ GAME_TYPE_MAP = {
 }
 
 # ----------------------------------------------------------------------
+# セッションステート初期化
+# ----------------------------------------------------------------------
+if 'raw_data' not in st.session_state:
+    st.session_state.raw_data = pd.DataFrame()
+if 'data_params' not in st.session_state:
+    # 7つの要素で初期化 (p_name, b_name, s_date, e_date, g_types, is_p_focus, is_b_focus)
+    st.session_state.data_params = (None, None, None, None, None, False, False)
+
+# ----------------------------------------------------------------------
 # 1. データ取得・検索関数 (キャッシュ付き)
 # ----------------------------------------------------------------------
 
@@ -54,8 +63,7 @@ def search_player_cached(name_str):
     if not name_str:
         return pd.DataFrame()
     try:
-        # last_name, first_name の指定はせず、文字列全体で検索させたほうがヒットしやすい場合もあるが
-        # ここではユーザー指定の 'Last Name' 検索に従う
+        # last_name, first_name の指定はせず、文字列全体で検索
         return playerid_lookup(name_str.lower().strip())
     except:
         return pd.DataFrame()
@@ -180,7 +188,7 @@ def draw_5x5_grid(ax):
     return x_lines, z_lines
 
 def draw_batter(ax, stand):
-    # 投手視点: 右打者(R)は左側、左打者(L)は右側
+    # 投手視点: 右打者(R)は左側(-)、左打者(L)は右側(+)
     if stand == 'R':
         base_x = -2.5
         extent = [-4.0, -1.0, 0, 6.0]
@@ -207,7 +215,7 @@ def draw_batter(ax, stand):
 def main():
     st.sidebar.title("⚾ MLB Analyzer Pro")
 
-    # セッションステート初期化 (シンプルに)
+    # セッションステート初期化
     if 'raw_data' not in st.session_state: st.session_state.raw_data = pd.DataFrame()
     if 'data_params' not in st.session_state: st.session_state.data_params = (None, None, None, None, None, False, False)
 
@@ -223,9 +231,9 @@ def main():
     )
     selected_game_types_code = [GAME_TYPE_MAP[l] for l in selected_game_types_label]
 
-    # B. 選手選択 (指定のシンプルロジック)
+    # B. 選手選択 (指定のシンプルロジックを採用)
     st.sidebar.subheader("👤 選手選択 (名前検索)")
-    st.sidebar.caption("姓(Last Name)を入力し、Enterで確定してください。")
+    st.sidebar.caption("姓(Last Name)を入力し、Enterまたはカーソルを外して確定してください。")
     
     selected_p_id, selected_p_name = None, ""
     selected_b_id, selected_b_name = None, ""
@@ -233,7 +241,7 @@ def main():
     # --- 投手検索 ---
     p_search = st.sidebar.text_input("投手 姓 (例: darvish)", key="p_input")
     if p_search:
-        found = search_player_cached(p_search) # キャッシュ付き関数を使用
+        found = search_player_cached(p_search) # キャッシュ関数を使用
         if not found.empty:
             found['label'] = found['name_first'] + " " + found['name_last'] + " (" + found['mlb_played_first'].astype(str) + "-" + found['mlb_played_last'].astype(str) + ")"
             p_choice = st.sidebar.selectbox("候補 (P)", ["指定なし"] + found['label'].tolist(), key="p_box")
@@ -246,7 +254,7 @@ def main():
     # --- 打者検索 ---
     b_search = st.sidebar.text_input("打者 姓 (例: ohtani)", key="b_input")
     if b_search:
-        found = search_player_cached(b_search) # キャッシュ付き関数を使用
+        found = search_player_cached(b_search) # キャッシュ関数を使用
         if not found.empty:
             found['label'] = found['name_first'] + " " + found['name_last'] + " (" + found['mlb_played_first'].astype(str) + "-" + found['mlb_played_last'].astype(str) + ")"
             b_choice = st.sidebar.selectbox("候補 (B)", ["指定なし"] + found['label'].tolist(), key="b_box")
@@ -276,6 +284,7 @@ def main():
                 is_p = selected_p_id is not None
                 is_b = selected_b_id is not None
                 st.session_state.raw_data = df_raw
+                # 7つの要素をタプルとして保存
                 st.session_state.data_params = (selected_p_name, selected_b_name, str(start_date), str(end_date), ", ".join(selected_game_types_label), is_p, is_b)
                 st.success(f"完了: {len(df_raw)} 球")
 
@@ -289,6 +298,7 @@ def main():
     if st.session_state.raw_data.empty:
         st.info("データがありません。STEP 1を実行してください。")
     else:
+        # ここで7つの要素を展開
         p_name, b_name, s_date, e_date, g_types, is_p_focus, is_b_focus = st.session_state.data_params
         
         title_str = "League Wide"
