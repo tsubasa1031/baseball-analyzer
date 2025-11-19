@@ -2,12 +2,18 @@ import streamlit as st
 import pandas as pd
 import datetime
 import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import matplotlib.patches as patches
+import matplotlib.colors as mcolors
+import matplotlib.cm as cm
+import matplotlib.image as mpimg
 import traceback
 import os
 import time 
 
 # ----------------------------------------------------------------------
-# 0. ページ設定 (何よりも先に実行する必須ルール)
+# 0. ページ設定 (何よりも先に実行)
 # ----------------------------------------------------------------------
 st.set_page_config(
     page_title="⚾ MLB Analyzer Pro",
@@ -17,20 +23,12 @@ st.set_page_config(
 )
 
 # ----------------------------------------------------------------------
-# 1. ライブラリ読み込み (重い処理はここから)
+# 1. ライブラリ読み込み
 # ----------------------------------------------------------------------
-import matplotlib.pyplot as plt
-import seaborn as sns
-import matplotlib.patches as patches
-import matplotlib.colors as mcolors
-import matplotlib.cm as cm
-import matplotlib.image as mpimg
-
-# pybaseballの読み込みをtry-catchで保護
 try:
     import pybaseball
     from pybaseball import statcast_pitcher, statcast_batter, playerid_lookup, statcast
-    # ※ pybaseball.cache.enable() はクラウド環境でエラー原因になるため削除
+    # クラウド環境でのクラッシュを防ぐため、明示的なキャッシュ有効化は行わない
 except ImportError as e:
     st.error(f"ライブラリの読み込みに失敗しました。requirements.txtを確認してください: {e}")
     st.stop()
@@ -50,16 +48,20 @@ GAME_TYPE_MAP = {
 }
 
 # ----------------------------------------------------------------------
-# 3. セッションステート初期化
+# 3. セッションステート初期化 (★ここが修正ポイント)
 # ----------------------------------------------------------------------
 if 'raw_data' not in st.session_state:
     st.session_state.raw_data = pd.DataFrame()
-if 'data_params' not in st.session_state:
-    # 7つの要素で初期化 (p_name, b_name, s_date, e_date, g_types, is_p_focus, is_b_focus)
+
+# 古いデータ形式(5要素)が残っていたら、強制的にリセットして7要素にする
+if 'data_params' not in st.session_state or \
+   st.session_state.data_params is None or \
+   len(st.session_state.data_params) != 7:
+    # (p_name, b_name, s_date, e_date, g_types, is_p_focus, is_b_focus)
     st.session_state.data_params = (None, None, None, None, None, False, False)
 
 # ----------------------------------------------------------------------
-# 4. データ取得・検索関数 (キャッシュ付き)
+# 4. データ取得・検索関数
 # ----------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
@@ -149,8 +151,7 @@ def get_metrics_summary(df, is_batter_focus, is_pitcher_focus):
     h = df['is_hit'].sum();
     
     ba = h / ab if ab > 0 else 0.0
-    obp_denom = df['is_obp_denom'].sum()
-    obp = df['is_on_base'].sum() / obp_denom if obp_denom > 0 else 0.0
+    obp = df['is_on_base'].sum() / df['is_obp_denom'].sum() if df['is_obp_denom'].sum() > 0 else 0.0
     slg = df['slugging_base'].sum() / ab if ab > 0 else 0.0
     ops = obp + slg
     hard_hit_rate = df['is_hard_hit'].mean()
@@ -219,18 +220,18 @@ def main():
     # A. 期間
     st.sidebar.markdown("### STEP 1: データ取得")
     col_d1, col_d2 = st.sidebar.columns(2)
-    with col_d1: start_date = st.date_input("開始", datetime.date(2025, 3, 27), key="start_date_input")
-    with col_d2: end_date = st.date_input("終了", datetime.date(2025, 11, 2), key="end_date_input")
+    with col_d1: start_date = st.date_input("開始", datetime.date(2025, 3, 27))
+    with col_d2: end_date = st.date_input("終了", datetime.date(2025, 11, 2))
 
     # A2. 試合タイプ
     selected_game_types_label = st.sidebar.multiselect(
-        "対象試合", options=list(GAME_TYPE_MAP.keys()), default=['Regular Season', 'Postseason'], key="step1_game_type"
+        "対象試合", options=list(GAME_TYPE_MAP.keys()), default=['Regular Season', 'Postseason']
     )
     selected_game_types_code = [GAME_TYPE_MAP[l] for l in selected_game_types_label]
 
     # B. 選手選択 (名前検索)
-    st.sidebar.subheader("👤 選手選択")
-    st.sidebar.caption("姓(Last Name)を入力し、Enterで確定後、下のリストから選択してください。")
+    st.sidebar.subheader("👤 選手選択 (名前検索)")
+    st.sidebar.caption("姓(Last Name)を入力し、Enterまたはカーソルを外して確定してください。")
     
     selected_p_id, selected_p_name = None, ""
     selected_b_id, selected_b_name = None, ""
@@ -239,7 +240,7 @@ def main():
     p_search = st.sidebar.text_input("投手 姓 (例: darvish)", key="p_search_input")
     p_choice_label = "指定なし"
     if p_search:
-        p_found = search_player(p_search)
+        p_found = search_player_cached(p_search)
         if not p_found.empty:
             p_found['label'] = p_found['name_first'] + " " + p_found['name_last'] + " (" + p_found['mlb_played_first'].astype(str) + "-" + p_found['mlb_played_last'].astype(str) + ")"
             p_choice_label = st.sidebar.selectbox("候補 (P)", ["指定なし"] + p_found['label'].tolist(), key="p_select_box")
@@ -253,7 +254,7 @@ def main():
     b_search = st.sidebar.text_input("打者 姓 (例: ohtani)", key="b_search_input")
     b_choice_label = "指定なし"
     if b_search:
-        b_found = search_player(b_search)
+        b_found = search_player_cached(b_search)
         if not b_found.empty:
             b_found['label'] = b_found['name_first'] + " " + b_found['name_last'] + " (" + b_found['mlb_played_first'].astype(str) + "-" + b_found['mlb_played_last'].astype(str) + ")"
             b_choice_label = st.sidebar.selectbox("候補 (B)", ["指定なし"] + b_found['label'].tolist(), key="b_select_box")
@@ -268,26 +269,23 @@ def main():
         
         if not selected_p_id and not selected_b_id:
             st.warning("選手が指定されていません。リーグ全体のデータを取得します。")
-        
-        # Statcastデータ取得
-        with st.spinner('データ取得中... (時間がかかります)'):
-            try:
-                df_raw = get_statcast_data_safe(str(start_date), str(end_date), selected_p_id, selected_b_id, selected_game_types_code)
-                
-                if df_raw.empty:
-                    st.session_state.raw_data = pd.DataFrame()
-                    st.session_state.data_params = (None, None, None, None, None, False, False)
-                    st.error("データが見つかりませんでした。条件を変更してください。")
-                else:
-                    is_p_focus = selected_p_id is not None
-                    is_b_focus = selected_b_id is not None
-                    st.session_state.raw_data = df_raw
-                    st.session_state.data_params = (selected_p_name, selected_b_name, str(start_date), str(end_date), ", ".join(selected_game_types_label), is_p_focus, is_b_focus)
-                    st.success(f"データ取得完了: {len(df_raw)} 球")
-            except Exception as e:
+            
+        if not selected_p_id and not selected_b_id and (end_date - start_date).days > 14:
+             st.warning("期間が長すぎるため、リーグ全体の取得はタイムアウトする可能性があります。")
+
+        with st.spinner('データ取得中...'):
+            df_raw = get_statcast_data_safe(str(start_date), str(end_date), selected_p_id, selected_b_id, selected_game_types_code)
+            
+            if df_raw.empty:
                 st.session_state.raw_data = pd.DataFrame()
                 st.session_state.data_params = (None, None, None, None, None, False, False)
-                st.error(f"データ取得エラー: {e}")
+                st.error("データが見つかりませんでした。条件を変更してください。")
+            else:
+                is_p_focus = selected_p_id is not None
+                is_b_focus = selected_b_id is not None
+                st.session_state.raw_data = df_raw
+                st.session_state.data_params = (selected_p_name, selected_b_name, str(start_date), str(end_date), ", ".join(selected_game_types_label), is_p_focus, is_b_focus)
+                st.success(f"データ取得完了: {len(df_raw)} 球")
 
     # ==========================================
     # STEP 2: フィルター & 分析
