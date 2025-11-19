@@ -30,7 +30,6 @@ try:
     from pybaseball import statcast_pitcher, statcast_batter, playerid_lookup, statcast
     pybaseball.cache.enable()
 except ImportError as e:
-    # requirements.txtが不足している場合に表示されるエラー
     st.error(f"ライブラリの読み込みに失敗しました。requirements.txtを更新してください。: {e}")
     st.stop()
 
@@ -211,14 +210,17 @@ def draw_5x5_grid(ax):
 def draw_batter(ax, stand):
     """打者画像またはシルエットを描画 (投手視点)"""
     # 視点：投手視点（ホームベースの方向を見る）
+    # X軸：左側がマイナス、右側がプラス
     # 打者位置：右打者（R）は画面の左側 (X<0) に配置
     # 打者位置：左打者（L）は画面の右側 (X>0) に配置
 
     if stand == 'R':
-        base_x = -2.5 # 投手視点: 右打者（R）は左側 (X<0) に配置
+        # 投手視点: 右打者（R）は左側 (X<0) に配置
+        base_x = -2.5 
         extent = [-4.0, -1.0, 0, 6.0]
     else:
-        base_x = 2.5 # 投手視点: 左打者（L）は右側 (X>0) に配置
+        # 投手視点: 左打者（L）は右側 (X>0) に配置
+        base_x = 2.5
         extent = [1.0, 4.0, 0, 6.0]
 
     loaded = False
@@ -227,6 +229,7 @@ def draw_batter(ax, stand):
     # 1. 画像ファイルの存在チェックと読み込み (GitHubに画像があれば表示)
     if os.path.exists(img_file):
         try:
+            # 投手視点では、Rの画像が左側に来るようにする
             img = mpimg.imread(img_file)
             ax.imshow(img, extent=extent, aspect='auto', zorder=0)
             loaded = True
