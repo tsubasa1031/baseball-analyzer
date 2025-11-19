@@ -48,7 +48,7 @@ GAME_TYPE_MAP = {
 }
 
 # ----------------------------------------------------------------------
-# 3. セッションステート初期化 (★ここが修正ポイント)
+# 3. セッションステート初期化
 # ----------------------------------------------------------------------
 if 'raw_data' not in st.session_state:
     st.session_state.raw_data = pd.DataFrame()
@@ -70,6 +70,7 @@ def search_player_cached(name_str):
     if not name_str:
         return pd.DataFrame()
     try:
+        # last_name検索
         return playerid_lookup(name_str.lower().strip())
     except:
         return pd.DataFrame()
@@ -242,8 +243,20 @@ def main():
     if p_search:
         p_found = search_player_cached(p_search)
         if not p_found.empty:
+            
+            # --- ★自動選択ロジック（ここが肝）★ ---
             p_found['label'] = p_found['name_first'] + " " + p_found['name_last'] + " (" + p_found['mlb_played_first'].astype(str) + "-" + p_found['mlb_played_last'].astype(str) + ")"
-            p_choice_label = st.sidebar.selectbox("候補 (P)", ["指定なし"] + p_found['label'].tolist(), key="p_select_box")
+            p_options = ["指定なし"] + p_found['label'].tolist()
+            default_index = 0
+            
+            if len(p_found) == 1:
+                # 1件のみなら、index 1 (最初の候補) をデフォルトにする
+                default_index = 1
+                st.sidebar.info(f"投手: **{p_found.iloc[0]['label']}** を自動選択しました。")
+            
+            p_choice_label = st.sidebar.selectbox("候補 (P)", p_options, index=default_index, key="p_select_box")
+            
+            # 選択された値に基づいてIDを確定
             if p_choice_label != "指定なし":
                 row = p_found[p_found['label'] == p_choice_label].iloc[0]
                 selected_p_id, selected_p_name = int(row['key_mlbam']), f"{row['name_first']} {row['name_last']}"
@@ -256,8 +269,20 @@ def main():
     if b_search:
         b_found = search_player_cached(b_search)
         if not b_found.empty:
+            
+            # --- ★自動選択ロジック（ここが肝）★ ---
             b_found['label'] = b_found['name_first'] + " " + b_found['name_last'] + " (" + b_found['mlb_played_first'].astype(str) + "-" + b_found['mlb_played_last'].astype(str) + ")"
-            b_choice_label = st.sidebar.selectbox("候補 (B)", ["指定なし"] + b_found['label'].tolist(), key="b_select_box")
+            b_options = ["指定なし"] + b_found['label'].tolist()
+            default_index = 0
+            
+            if len(b_found) == 1:
+                # 1件のみなら、index 1 (最初の候補) をデフォルトにする
+                default_index = 1
+                st.sidebar.info(f"打者: **{b_found.iloc[0]['label']}** を自動選択しました。")
+
+            b_choice_label = st.sidebar.selectbox("候補 (B)", b_options, index=default_index, key="b_select_box")
+
+            # 選択された値に基づいてIDを確定
             if b_choice_label != "指定なし":
                 row = b_found[b_found['label'] == b_choice_label].iloc[0]
                 selected_b_id, selected_b_name = int(row['key_mlbam']), f"{row['name_first']} {row['name_last']}"
