@@ -221,8 +221,8 @@ def main():
     # A. 期間
     st.sidebar.markdown("### STEP 1: データ取得")
     col_d1, col_d2 = st.sidebar.columns(2)
-    with col_d1: start_date = st.date_input("開始", datetime.date(2025, 3, 27))
-    with col_d2: end_date = st.date_input("終了", datetime.date(2025, 11, 2))
+    with col_d1: start_date = st.date_input("開始", datetime.date(2025, 1, 1))
+    with col_d2: end_date = st.date_input("終了", datetime.date(2025, 12, 31))
 
     # A2. 試合タイプ
     selected_game_types_label = st.sidebar.multiselect(
@@ -437,3 +437,4 @@ if __name__ == "__main__":
     except Exception as e:
         st.error("エラーが発生しました")
         st.code(traceback.format_exc())
+
