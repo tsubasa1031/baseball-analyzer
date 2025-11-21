@@ -114,9 +114,9 @@ def process_statcast_data(df_input):
     df = df_input.copy()
     if 'game_date' in df.columns: df = df.sort_values('game_date').reset_index(drop=True)
 
-    cols_to_init = ['balls', 'strikes', 'outs_when_up', 'launch_speed', 'launch_angle', 'woba_value', 'plate_x', 'plate_z', 'stand', 'p_throws']
+    cols_to_init = ['balls', 'strikes', 'outs_when_up', 'launch_speed', 'launch_angle', 'woba_value', 'plate_x', 'plate_z', 'stand', 'p_throws', 'pitch_type', 'bb_type', 'events']
     for c in cols_to_init:
-        if c not in df.columns: df[c] = 0 if c not in ['woba_value', 'stand', 'p_throws'] else np.nan
+        if c not in df.columns: df[c] = np.nan if c in ['woba_value', 'launch_speed', 'launch_angle', 'bb_type'] else 0
 
     if 'events' in df.columns:
         events = df['events'].fillna('nan').str.lower()
@@ -157,17 +157,54 @@ def get_metrics_summary(df, is_batter_focus, is_pitcher_focus):
     ops = obp + slg
     hard_hit_rate = df['is_hard_hit'].mean()
     
-    if is_batter_focus and not is_pitcher_focus:
-        main_metric_title = "打撃分析 (Batting)"
-        ba_label = "BA"
-    elif is_pitcher_focus and not is_batter_focus:
-        main_metric_title = "投球分析 (Pitching)"
-        ba_label = "BA Against (被打率)"
-    else:
-        main_metric_title = "集計分析 (Overall)"
-        ba_label = "BA / BA Against"
+    summary_parts = []
+    
+    # 共通指標
+    summary_parts.append(f"PA: {pa} | AB: {ab}")
+    ba_label = "BA" if is_batter_focus and not is_pitcher_focus else "BA Against" if is_pitcher_focus and not is_batter_focus else "BA/BA Against"
+    summary_parts.append(f"{ba_label}: {ba:.3f} | OPS: {ops:.3f}")
+    summary_parts.append(f"HardHit%: {hard_hit_rate:.1%} | Barrel%: {df['is_barrel'].mean():.1%}")
 
-    return f"#### {main_metric_title}\nPA: {pa} | {ba_label}: {ba:.3f} | OPS: {ops:.3f} | HardHit%: {hard_hit_rate:.1%}"
+    # ----------------------------------------------------
+    # 投手分析時: 打球タイプ割合
+    # ----------------------------------------------------
+    if is_pitcher_focus and not is_batter_focus and 'bb_type' in df.columns:
+        batted_balls = df[df['bb_type'].notna()].copy()
+        if not batted_balls.empty:
+            bb_counts = batted_balls['bb_type'].value_counts()
+            total_bb = bb_counts.sum()
+            
+            if total_bb > 0:
+                bb_ratios = (bb_counts / total_bb * 100).round(1).apply(lambda x: f"{x}%")
+                
+                bb_summary = "打球タイプ: "
+                bb_summary += f"GB: {bb_ratios.get('ground_ball', '0.0%')} / "
+                bb_summary += f"FB: {bb_ratios.get('fly_ball', '0.0%')} / "
+                bb_summary += f"LD: {bb_ratios.get('line_drive', '0.0%')} / "
+                bb_summary += f"PU: {bb_ratios.get('popup', '0.0%')}"
+                summary_parts.append(bb_summary)
+
+    # ----------------------------------------------------
+    # 打者分析時: 球種割合 (相手投手の)
+    # ----------------------------------------------------
+    elif is_batter_focus and not is_pitcher_focus and 'pitch_type' in df.columns:
+        pitch_mix = df[df['pitch_type'].notna()].copy()
+        if not pitch_mix.empty:
+            pt_counts = pitch_mix['pitch_type'].value_counts()
+            total_pt = pt_counts.sum()
+            
+            if total_pt > 0:
+                pt_ratios = (pt_counts / total_pt * 100).round(1).sort_values(ascending=False)
+                
+                pt_summary = "球種割合 (Top 3): "
+                top_3 = pt_ratios.head(3)
+                pt_summary += " / ".join([f"{name}: {ratio:.1f}%" for name, ratio in top_3.items()])
+                summary_parts.append(pt_summary)
+
+    
+    final_title = "投球分析" if is_pitcher_focus and not is_batter_focus else "打撃分析" if is_batter_focus and not is_pitcher_focus else "集計分析"
+    
+    return f"#### {final_title}\n" + "\n\n".join(summary_parts)
 
 # --- 描画 ---
 def draw_5x5_grid(ax):
@@ -221,8 +258,8 @@ def main():
     # A. 期間
     st.sidebar.markdown("### STEP 1: データ取得")
     col_d1, col_d2 = st.sidebar.columns(2)
-    with col_d1: start_date = st.date_input("開始", datetime.date(2025, 1, 1))
-    with col_d2: end_date = st.date_input("終了", datetime.date(2025, 12, 31))
+    with col_d1: start_date = st.date_input("開始", datetime.date(2025, 3, 27))
+    with col_d2: end_date = st.date_input("終了", datetime.date(2025, 11, 2))
 
     # A2. 試合タイプ
     selected_game_types_label = st.sidebar.multiselect(
@@ -437,4 +474,3 @@ if __name__ == "__main__":
     except Exception as e:
         st.error("エラーが発生しました")
         st.code(traceback.format_exc())
-
