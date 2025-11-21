@@ -125,7 +125,7 @@ def process_statcast_data(df_input):
         ab_events = hits + ['field_out', 'strikeout', 'grounded_into_double_play', 'double_play', 'fielders_choice', 'force_out']
         df['is_at_bat'] = events.isin(ab_events).astype(int)
         pa_events = ab_events + ['walk', 'hit_by_pitch', 'sac_fly']
-        df['is_pa_event'] = events.isin(pa_events).astype(int) # ★修正: pa_evts -> pa_events
+        df['is_pa_event'] = events.isin(pa_events).astype(int)
         
         # K, BB, HR, SF カウント追加
         df['is_strikeout'] = events.isin(['strikeout', 'strikeout_double_play']).astype(int)
@@ -159,81 +159,126 @@ def process_statcast_data(df_input):
 
 def get_metrics_summary(df, is_batter_focus, is_pitcher_focus):
     if df.empty: return "#### データがありません"
+    
+    # 基本カウント
     pa = df['is_pa_event'].sum()
     ab = df['is_at_bat'].sum()
     h = df['is_hit'].sum()
+    k = df['is_strikeout'].sum()
+    bb = df['is_walk'].sum()
+    hr = df['is_hr'].sum()
     
-    k_count = df['is_strikeout'].sum()
-    bb_count = df['is_walk'].sum()
-    hr_count = df['is_hr'].sum()
-    
-    # 分母の計算
     denom_pa = pa if pa > 0 else 1 
-    bip_denom = df['is_bip_event'].sum()
     
-    # 伝統的な指標
-    ba = h / ab if ab > 0 else 0.0
-    slg = df['slugging_base'].sum() / ab if ab > 0 else 0.0
-    obp = df['is_on_base'].sum() / df['is_obp_denom'].sum() if df['is_obp_denom'].sum() > 0 else 0.0
-    ops = obp + slg
-    
-    # セイバーメトリクス指標
-    woba_avg = df['woba_value'].mean() if 'woba_value' in df.columns and pa > 0 else np.nan
-    iso = slg - ba
-    babip = (h - hr_count) / bip_denom if bip_denom > 0 else 0.0
-
-    # 割合指標
-    k_percent = (k_count / denom_pa) * 100
-    bb_percent = (bb_count / denom_pa) * 100
-    k_to_bb = k_count / bb_count if bb_count > 0 else k_count if k_count > 0 else 0
-    hard_hit_rate = df['is_hard_hit'].mean()
-    
-    # ----------------------------------------------------
-    # サマリー表示構築
-    # ----------------------------------------------------
-    
-    summary_parts = []
-    
-    # 1. 基本指標 (共通)
-    ba_label = "BA" if is_batter_focus and not is_pitcher_focus else "BA Against" if is_pitcher_focus and not is_batter_focus else "BA/BA Against"
-    summary_parts.append(f"PA: {pa} | {ba_label}: {ba:.3f} | OPS: {ops:.3f}")
-    
-    # 2. セイバーメトリクス (共通)
-    woba_str = f"wOBA: {woba_avg:.3f}" if not np.isnan(woba_avg) else "wOBA: N/A"
-    summary_parts.append(f"{woba_str} | ISO: {iso:.3f} | BABIP: {babip:.3f}")
-    
-    # 3. K/BB指標 (投打別)
-    kbb_summary = f"K%: {k_percent:.1f}% | BB%: {bb_percent:.1f}%"
+    # --- 投手分析 (Pitching Metrics) ---
     if is_pitcher_focus and not is_batter_focus:
-        kbb_summary += f" | K/BB: {k_to_bb:.2f}"
-    summary_parts.append(kbb_summary)
-    
-    # 4. 打球の質
-    summary_parts.append(f"HardHit%: {hard_hit_rate:.1%} | Barrel%: {df['is_barrel'].mean():.1%}")
+        # 指標計算
+        k_pct = (k / denom_pa) * 100
+        bb_pct = (bb / denom_pa) * 100
+        k_minus_bb = k_pct - bb_pct
+        
+        baa = h / ab if ab > 0 else 0.0
+        obp = df['is_on_base'].sum() / df['is_obp_denom'].sum() if df['is_obp_denom'].sum() > 0 else 0.0
+        slg = df['slugging_base'].sum() / ab if ab > 0 else 0.0
+        ops_against = obp + slg
+        
+        woba_against = df['woba_value'].mean() if 'woba_value' in df.columns else 0.0
+        
+        # BABIP = (H - HR) / (AB - K - HR + SF)
+        babip_denom = ab - k - hr + df['is_sac_fly'].sum()
+        babip_against = (h - hr) / babip_denom if babip_denom > 0 else 0.0
+        
+        hard_hit = df['is_hard_hit'].mean()
+        barrel = df['is_barrel'].mean()
 
-    # 5. 割合情報 (投打別)
-    if is_pitcher_focus and not is_batter_focus and 'bb_type' in df.columns:
-        # 投手分析時: 打球タイプ割合
-        batted_balls = df[df['bb_type'].notna()].copy()
-        if not batted_balls.empty and batted_balls['bb_type'].value_counts().sum() > 0:
-            bb_ratios = (batted_balls['bb_type'].value_counts(normalize=True) * 100).round(1).apply(lambda x: f"{x}%")
-            bb_summary = "打球タイプ: "
-            bb_summary += f"GB: {bb_ratios.get('ground_ball', '0.0%')} / FB: {bb_ratios.get('fly_ball', '0.0%')} / LD: {bb_ratios.get('line_drive', '0.0%')} / PU: {bb_ratios.get('popup', '0.0%')}"
-            summary_parts.append(bb_summary)
+        summary = f"""
+        #### 投手分析 (Pitcher Metrics)
+        
+        **基本成績**
+        - **TBF (対戦打者)**: {pa}
+        - **Pitches**: {len(df)}
+        - **BAA (被打率)**: {baa:.3f}
+        - **OPS Against**: {ops_against:.3f}
 
-    elif is_batter_focus and not is_pitcher_focus and 'pitch_type' in df.columns:
-        # 打者分析時: 球種割合
-        pitch_mix = df[df['pitch_type'].notna()].copy()
-        if not pitch_mix.empty and pitch_mix['pitch_type'].value_counts().sum() > 0:
-            pt_ratios = (pitch_mix['pitch_type'].value_counts(normalize=True) * 100).round(1).sort_values(ascending=False)
-            top_3 = pt_ratios.head(3)
-            pt_summary = "球種割合 (Top 3): "
-            pt_summary += " / ".join([f"{name}: {ratio:.1f}%" for name, ratio in top_3.items()])
-            summary_parts.append(pt_summary)
+        **制球・三振 (Control)**
+        - **K%**: {k_pct:.1f}%
+        - **BB%**: {bb_pct:.1f}%
+        - **K-BB%**: {k_minus_bb:.1f}%
+        
+        **打球管理 (Batted Ball)**
+        - **wOBA Against**: {woba_against:.3f}
+        - **BABIP**: {babip_against:.3f}
+        - **HardHit%**: {hard_hit:.1%}
+        - **Barrel%**: {barrel:.1%}
+        """
+        
+        # 球種割合 (Pitch Usage)
+        if 'pitch_type' in df.columns:
+            pt_counts = df['pitch_type'].value_counts(normalize=True).head(5) * 100
+            if not pt_counts.empty:
+                pt_str = " | ".join([f"{k}: {v:.1f}%" for k, v in pt_counts.items()])
+                summary += f"\n\n**球種割合**: {pt_str}"
 
-    final_title = "投球分析" if is_pitcher_focus and not is_batter_focus else "打撃分析" if is_batter_focus and not is_pitcher_focus else "集計分析"
-    
-    return f"#### {final_title}\n" + "\n\n".join(summary_parts)
+        return summary
+
+    # --- 打者分析 (Batting Metrics) ---
+    elif is_batter_focus and not is_pitcher_focus:
+        # 指標計算
+        avg = h / ab if ab > 0 else 0.0
+        obp = df['is_on_base'].sum() / df['is_obp_denom'].sum() if df['is_obp_denom'].sum() > 0 else 0.0
+        slg = df['slugging_base'].sum() / ab if ab > 0 else 0.0
+        ops = obp + slg
+        
+        iso = slg - avg
+        woba = df['woba_value'].mean() if 'woba_value' in df.columns else 0.0
+        
+        babip_denom = ab - k - hr + df['is_sac_fly'].sum()
+        babip = (h - hr) / babip_denom if babip_denom > 0 else 0.0
+        
+        k_pct = (k / denom_pa) * 100
+        bb_pct = (bb / denom_pa) * 100
+        bb_k = bb / k if k > 0 else bb
+        
+        hard_hit = df['is_hard_hit'].mean()
+        barrel = df['is_barrel'].mean()
+
+        summary = f"""
+        #### 打撃分析 (Batter Metrics)
+        
+        **基本成績**
+        - **PA**: {pa} | **AB**: {ab} | **H**: {h} | **HR**: {hr}
+        - **AVG**: {avg:.3f} | **OBP**: {obp:.3f} | **SLG**: {slg:.3f}
+        - **OPS**: {ops:.3f}
+        
+        **セイバーメトリクス (Advanced)**
+        - **wOBA**: {woba:.3f}
+        - **ISO**: {iso:.3f}
+        - **BABIP**: {babip:.3f}
+        
+        **アプローチ (Discipline)**
+        - **K%**: {k_pct:.1f}% | **BB%**: {bb_pct:.1f}% | **BB/K**: {bb_k:.2f}
+        
+        **打球質 (Quality of Contact)**
+        - **HardHit%**: {hard_hit:.1%}
+        - **Barrel%**: {barrel:.1%}
+        """
+        return summary
+
+    # --- その他 (リーグ全体・対戦など) ---
+    else:
+        avg = h / ab if ab > 0 else 0.0
+        obp = df['is_on_base'].sum() / df['is_obp_denom'].sum() if df['is_obp_denom'].sum() > 0 else 0.0
+        slg = df['slugging_base'].sum() / ab if ab > 0 else 0.0
+        ops = obp + slg
+        woba = df['woba_value'].mean() if 'woba_value' in df.columns else 0.0
+        
+        return f"""
+        #### 集計分析 (Overall / Matchup)
+        - **PA**: {pa} | **AB**: {ab} | **H**: {h}
+        - **BA**: {avg:.3f}
+        - **OPS**: {ops:.3f}
+        - **wOBA**: {woba:.3f}
+        """
 
 # --- 描画 ---
 def draw_5x5_grid(ax):
@@ -488,7 +533,6 @@ def main():
                 st.pyplot(fig)
 
             with col_res2:
-                st.markdown("### Summary")
                 st.info(get_metrics_summary(df_filtered, is_b_focus, is_p_focus))
                 st.dataframe(df_filtered[['game_date', 'events', 'description', 'pitch_type', 'launch_speed']].head(20))
 
