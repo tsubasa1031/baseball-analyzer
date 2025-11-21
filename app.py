@@ -125,7 +125,7 @@ def process_statcast_data(df_input):
         ab_events = hits + ['field_out', 'strikeout', 'grounded_into_double_play', 'double_play', 'fielders_choice', 'force_out']
         df['is_at_bat'] = events.isin(ab_events).astype(int)
         pa_events = ab_events + ['walk', 'hit_by_pitch', 'sac_fly']
-        df['is_pa_event'] = events.isin(pa_events).astype(int)
+        df['is_pa_event'] = events.isin(pa_evts).astype(int)
         
         # K, BB, HR, SF カウント追加
         df['is_strikeout'] = events.isin(['strikeout', 'strikeout_double_play']).astype(int)
@@ -138,11 +138,11 @@ def process_statcast_data(df_input):
         df['is_obp_denom'] = (df['is_at_bat'] | events.isin(['walk', 'hit_by_pitch', 'sac_fly'])).astype(int)
         df['is_on_base'] = (df['is_hit'] | events.isin(['walk', 'hit_by_pitch'])).astype(int)
         
-        # BIPの分母となる打球 (HBP, K, BB, SF を除いた打席)
-        df['is_bip_ab'] = df['is_at_bat'] - df['is_strikeout'] 
+        # 打球 (Batted Balls In Play) の分母
+        df['is_bip_event'] = (df['is_at_bat'] == 1) & (df['is_strikeout'] == 0) & (df['is_hr'] == 0) 
     else:
         df['is_hit'] = 0; df['is_at_bat'] = 0; df['is_pa_event'] = 0; df['slugging_base'] = 0; df['is_strikeout'] = 0; df['is_walk'] = 0; df['is_hr'] = 0
-        df['is_bip_ab'] = 0
+        df['is_bip_event'] = 0
 
 
     df['is_hard_hit'] = (df['launch_speed'].fillna(0) >= 95.0).astype(int)
@@ -167,25 +167,25 @@ def get_metrics_summary(df, is_batter_focus, is_pitcher_focus):
     bb_count = df['is_walk'].sum()
     hr_count = df['is_hr'].sum()
     
-    # TBF (対戦打者数) は PA (打席) を使用
+    # 分母の計算
     denom_pa = pa if pa > 0 else 1 
-    bip_denom = ab - k_count - hr_count # 打数からKとHRを引いたもの
-
-    k_percent = (k_count / denom_pa) * 100
-    bb_percent = (bb_count / denom_pa) * 100
-    k_to_bb = k_count / bb_count if bb_count > 0 else k_count if k_count > 0 else 0
+    bip_denom = df['is_bip_event'].sum()
     
-    # BA, SLG, OPS
+    # 伝統的な指標
     ba = h / ab if ab > 0 else 0.0
     slg = df['slugging_base'].sum() / ab if ab > 0 else 0.0
     obp = df['is_on_base'].sum() / df['is_obp_denom'].sum() if df['is_obp_denom'].sum() > 0 else 0.0
     ops = obp + slg
     
     # セイバーメトリクス指標
+    woba_avg = df['woba_value'].mean() if 'woba_value' in df.columns and pa > 0 else np.nan
     iso = slg - ba
     babip = (h - hr_count) / bip_denom if bip_denom > 0 else 0.0
-    woba_avg = df['woba_value'].mean() if 'woba_value' in df.columns and pa > 0 else np.nan
 
+    # 割合指標
+    k_percent = (k_count / denom_pa) * 100
+    bb_percent = (bb_count / denom_pa) * 100
+    k_to_bb = k_count / bb_count if bb_count > 0 else k_count if k_count > 0 else 0
     hard_hit_rate = df['is_hard_hit'].mean()
     
     # ----------------------------------------------------
@@ -194,25 +194,26 @@ def get_metrics_summary(df, is_batter_focus, is_pitcher_focus):
     
     summary_parts = []
     
-    # 1. 基本/伝統指標
+    # 1. 基本指標 (共通)
     ba_label = "BA" if is_batter_focus and not is_pitcher_focus else "BA Against" if is_pitcher_focus and not is_batter_focus else "BA/BA Against"
     summary_parts.append(f"PA: {pa} | {ba_label}: {ba:.3f} | OPS: {ops:.3f}")
     
-    # 2. セイバーメトリクス指標
-    woba_str = f"wOBA: {woba_avg:.3f} (Statcast)" if not np.isnan(woba_avg) else "wOBA: N/A"
+    # 2. セイバーメトリクス (共通)
+    woba_str = f"wOBA: {woba_avg:.3f}" if not np.isnan(woba_avg) else "wOBA: N/A"
     summary_parts.append(f"{woba_str} | ISO: {iso:.3f} | BABIP: {babip:.3f}")
     
-    # 3. K/BB指標
+    # 3. K/BB指標 (投打別)
     kbb_summary = f"K%: {k_percent:.1f}% | BB%: {bb_percent:.1f}%"
     if is_pitcher_focus and not is_batter_focus:
         kbb_summary += f" | K/BB: {k_to_bb:.2f}"
     summary_parts.append(kbb_summary)
     
-    # 4. ハードヒット指標
+    # 4. 打球の質
     summary_parts.append(f"HardHit%: {hard_hit_rate:.1%} | Barrel%: {df['is_barrel'].mean():.1%}")
 
     # 5. 割合情報 (投打別)
     if is_pitcher_focus and not is_batter_focus and 'bb_type' in df.columns:
+        # 投手分析時: 打球タイプ割合
         batted_balls = df[df['bb_type'].notna()].copy()
         if not batted_balls.empty and batted_balls['bb_type'].value_counts().sum() > 0:
             bb_ratios = (batted_balls['bb_type'].value_counts(normalize=True) * 100).round(1).apply(lambda x: f"{x}%")
@@ -221,6 +222,7 @@ def get_metrics_summary(df, is_batter_focus, is_pitcher_focus):
             summary_parts.append(bb_summary)
 
     elif is_batter_focus and not is_pitcher_focus and 'pitch_type' in df.columns:
+        # 打者分析時: 球種割合
         pitch_mix = df[df['pitch_type'].notna()].copy()
         if not pitch_mix.empty and pitch_mix['pitch_type'].value_counts().sum() > 0:
             pt_ratios = (pitch_mix['pitch_type'].value_counts(normalize=True) * 100).round(1).sort_values(ascending=False)
