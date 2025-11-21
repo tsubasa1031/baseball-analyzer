@@ -114,9 +114,9 @@ def process_statcast_data(df_input):
     df = df_input.copy()
     if 'game_date' in df.columns: df = df.sort_values('game_date').reset_index(drop=True)
 
-    cols_to_init = ['balls', 'strikes', 'outs_when_up', 'launch_speed', 'launch_angle', 'woba_value', 'plate_x', 'plate_z', 'stand', 'p_throws', 'pitch_type', 'bb_type', 'events']
+    cols_to_init = ['balls', 'strikes', 'outs_when_up', 'launch_speed', 'launch_angle', 'woba_value', 'plate_x', 'plate_z', 'stand', 'p_throws', 'bb_type']
     for c in cols_to_init:
-        if c not in df.columns: df[c] = np.nan if c in ['woba_value', 'launch_speed', 'launch_angle', 'bb_type'] else 0
+        if c not in df.columns: df[c] = 0 if c not in ['woba_value', 'stand', 'p_throws', 'bb_type'] else np.nan
 
     if 'events' in df.columns:
         events = df['events'].fillna('nan').str.lower()
@@ -126,13 +126,24 @@ def process_statcast_data(df_input):
         df['is_at_bat'] = events.isin(ab_events).astype(int)
         pa_events = ab_events + ['walk', 'hit_by_pitch', 'sac_fly']
         df['is_pa_event'] = events.isin(pa_events).astype(int)
+        
+        # K, BB, HR, SF カウント追加
+        df['is_strikeout'] = events.isin(['strikeout', 'strikeout_double_play']).astype(int)
+        df['is_walk'] = events.isin(['walk', 'intent_walk']).astype(int)
+        df['is_hr'] = events.isin(['home_run']).astype(int)
+        df['is_sac_fly'] = events.isin(['sac_fly']).astype(int)
+
         tb_map = {'single': 1, 'double': 2, 'triple': 3, 'home_run': 4}
         df['slugging_base'] = events.map(tb_map).fillna(0).astype(int)
         df['is_obp_denom'] = (df['is_at_bat'] | events.isin(['walk', 'hit_by_pitch', 'sac_fly'])).astype(int)
         df['is_on_base'] = (df['is_hit'] | events.isin(['walk', 'hit_by_pitch'])).astype(int)
-        df['is_batted_ball'] = df['type'] == 'X'
+        
+        # BIPの分母となる打球 (HBP, K, BB, SF を除いた打席)
+        df['is_bip_ab'] = df['is_at_bat'] - df['is_strikeout'] 
     else:
-        df['is_hit'] = 0; df['is_at_bat'] = 0; df['is_pa_event'] = 0; df['slugging_base'] = 0; df['is_batted_ball'] = 0
+        df['is_hit'] = 0; df['is_at_bat'] = 0; df['is_pa_event'] = 0; df['slugging_base'] = 0; df['is_strikeout'] = 0; df['is_walk'] = 0; df['is_hr'] = 0
+        df['is_bip_ab'] = 0
+
 
     df['is_hard_hit'] = (df['launch_speed'].fillna(0) >= 95.0).astype(int)
     ls = df['launch_speed'].fillna(0); la = df['launch_angle'].fillna(0)
@@ -148,60 +159,76 @@ def process_statcast_data(df_input):
 
 def get_metrics_summary(df, is_batter_focus, is_pitcher_focus):
     if df.empty: return "#### データがありません"
-    pa = df['is_pa_event'].sum(); ab = df['is_at_bat'].sum()
-    h = df['is_hit'].sum();
+    pa = df['is_pa_event'].sum()
+    ab = df['is_at_bat'].sum()
+    h = df['is_hit'].sum()
     
+    k_count = df['is_strikeout'].sum()
+    bb_count = df['is_walk'].sum()
+    hr_count = df['is_hr'].sum()
+    
+    # TBF (対戦打者数) は PA (打席) を使用
+    denom_pa = pa if pa > 0 else 1 
+    bip_denom = ab - k_count - hr_count # 打数からKとHRを引いたもの
+
+    k_percent = (k_count / denom_pa) * 100
+    bb_percent = (bb_count / denom_pa) * 100
+    k_to_bb = k_count / bb_count if bb_count > 0 else k_count if k_count > 0 else 0
+    
+    # BA, SLG, OPS
     ba = h / ab if ab > 0 else 0.0
-    obp = df['is_on_base'].sum() / df['is_obp_denom'].sum() if df['is_obp_denom'].sum() > 0 else 0.0
     slg = df['slugging_base'].sum() / ab if ab > 0 else 0.0
+    obp = df['is_on_base'].sum() / df['is_obp_denom'].sum() if df['is_obp_denom'].sum() > 0 else 0.0
     ops = obp + slg
+    
+    # セイバーメトリクス指標
+    iso = slg - ba
+    babip = (h - hr_count) / bip_denom if bip_denom > 0 else 0.0
+    woba_avg = df['woba_value'].mean() if 'woba_value' in df.columns and pa > 0 else np.nan
+
     hard_hit_rate = df['is_hard_hit'].mean()
+    
+    # ----------------------------------------------------
+    # サマリー表示構築
+    # ----------------------------------------------------
     
     summary_parts = []
     
-    # 共通指標
-    summary_parts.append(f"PA: {pa} | AB: {ab}")
+    # 1. 基本/伝統指標
     ba_label = "BA" if is_batter_focus and not is_pitcher_focus else "BA Against" if is_pitcher_focus and not is_batter_focus else "BA/BA Against"
-    summary_parts.append(f"{ba_label}: {ba:.3f} | OPS: {ops:.3f}")
+    summary_parts.append(f"PA: {pa} | {ba_label}: {ba:.3f} | OPS: {ops:.3f}")
+    
+    # 2. セイバーメトリクス指標
+    woba_str = f"wOBA: {woba_avg:.3f} (Statcast)" if not np.isnan(woba_avg) else "wOBA: N/A"
+    summary_parts.append(f"{woba_str} | ISO: {iso:.3f} | BABIP: {babip:.3f}")
+    
+    # 3. K/BB指標
+    kbb_summary = f"K%: {k_percent:.1f}% | BB%: {bb_percent:.1f}%"
+    if is_pitcher_focus and not is_batter_focus:
+        kbb_summary += f" | K/BB: {k_to_bb:.2f}"
+    summary_parts.append(kbb_summary)
+    
+    # 4. ハードヒット指標
     summary_parts.append(f"HardHit%: {hard_hit_rate:.1%} | Barrel%: {df['is_barrel'].mean():.1%}")
 
-    # ----------------------------------------------------
-    # 投手分析時: 打球タイプ割合
-    # ----------------------------------------------------
+    # 5. 割合情報 (投打別)
     if is_pitcher_focus and not is_batter_focus and 'bb_type' in df.columns:
         batted_balls = df[df['bb_type'].notna()].copy()
-        if not batted_balls.empty:
-            bb_counts = batted_balls['bb_type'].value_counts()
-            total_bb = bb_counts.sum()
-            
-            if total_bb > 0:
-                bb_ratios = (bb_counts / total_bb * 100).round(1).apply(lambda x: f"{x}%")
-                
-                bb_summary = "打球タイプ: "
-                bb_summary += f"GB: {bb_ratios.get('ground_ball', '0.0%')} / "
-                bb_summary += f"FB: {bb_ratios.get('fly_ball', '0.0%')} / "
-                bb_summary += f"LD: {bb_ratios.get('line_drive', '0.0%')} / "
-                bb_summary += f"PU: {bb_ratios.get('popup', '0.0%')}"
-                summary_parts.append(bb_summary)
+        if not batted_balls.empty and batted_balls['bb_type'].value_counts().sum() > 0:
+            bb_ratios = (batted_balls['bb_type'].value_counts(normalize=True) * 100).round(1).apply(lambda x: f"{x}%")
+            bb_summary = "打球タイプ: "
+            bb_summary += f"GB: {bb_ratios.get('ground_ball', '0.0%')} / FB: {bb_ratios.get('fly_ball', '0.0%')} / LD: {bb_ratios.get('line_drive', '0.0%')} / PU: {bb_ratios.get('popup', '0.0%')}"
+            summary_parts.append(bb_summary)
 
-    # ----------------------------------------------------
-    # 打者分析時: 球種割合 (相手投手の)
-    # ----------------------------------------------------
     elif is_batter_focus and not is_pitcher_focus and 'pitch_type' in df.columns:
         pitch_mix = df[df['pitch_type'].notna()].copy()
-        if not pitch_mix.empty:
-            pt_counts = pitch_mix['pitch_type'].value_counts()
-            total_pt = pt_counts.sum()
-            
-            if total_pt > 0:
-                pt_ratios = (pt_counts / total_pt * 100).round(1).sort_values(ascending=False)
-                
-                pt_summary = "球種割合 (Top 3): "
-                top_3 = pt_ratios.head(3)
-                pt_summary += " / ".join([f"{name}: {ratio:.1f}%" for name, ratio in top_3.items()])
-                summary_parts.append(pt_summary)
+        if not pitch_mix.empty and pitch_mix['pitch_type'].value_counts().sum() > 0:
+            pt_ratios = (pitch_mix['pitch_type'].value_counts(normalize=True) * 100).round(1).sort_values(ascending=False)
+            top_3 = pt_ratios.head(3)
+            pt_summary = "球種割合 (Top 3): "
+            pt_summary += " / ".join([f"{name}: {ratio:.1f}%" for name, ratio in top_3.items()])
+            summary_parts.append(pt_summary)
 
-    
     final_title = "投球分析" if is_pitcher_focus and not is_batter_focus else "打撃分析" if is_batter_focus and not is_pitcher_focus else "集計分析"
     
     return f"#### {final_title}\n" + "\n\n".join(summary_parts)
@@ -281,19 +308,16 @@ def main():
         p_found = search_player_cached(p_search)
         if not p_found.empty:
             
-            # --- ★自動選択ロジック（ここが肝）★ ---
             p_found['label'] = p_found['name_first'] + " " + p_found['name_last'] + " (" + p_found['mlb_played_first'].astype(str) + "-" + p_found['mlb_played_last'].astype(str) + ")"
             p_options = ["指定なし"] + p_found['label'].tolist()
             default_index = 0
             
             if len(p_found) == 1:
-                # 1件のみなら、index 1 (最初の候補) をデフォルトにする
                 default_index = 1
                 st.sidebar.info(f"投手: **{p_found.iloc[0]['label']}** を自動選択しました。")
             
             p_choice_label = st.sidebar.selectbox("候補 (P)", p_options, index=default_index, key="p_select_box")
             
-            # 選択された値に基づいてIDを確定
             if p_choice_label != "指定なし":
                 row = p_found[p_found['label'] == p_choice_label].iloc[0]
                 selected_p_id, selected_p_name = int(row['key_mlbam']), f"{row['name_first']} {row['name_last']}"
@@ -307,19 +331,16 @@ def main():
         b_found = search_player_cached(b_search)
         if not b_found.empty:
             
-            # --- ★自動選択ロジック（ここが肝）★ ---
             b_found['label'] = b_found['name_first'] + " " + b_found['name_last'] + " (" + b_found['mlb_played_first'].astype(str) + "-" + b_found['mlb_played_last'].astype(str) + ")"
             b_options = ["指定なし"] + b_found['label'].tolist()
             default_index = 0
             
             if len(b_found) == 1:
-                # 1件のみなら、index 1 (最初の候補) をデフォルトにする
                 default_index = 1
                 st.sidebar.info(f"打者: **{b_found.iloc[0]['label']}** を自動選択しました。")
 
             b_choice_label = st.sidebar.selectbox("候補 (B)", b_options, index=default_index, key="b_select_box")
 
-            # 選択された値に基づいてIDを確定
             if b_choice_label != "指定なし":
                 row = b_found[b_found['label'] == b_choice_label].iloc[0]
                 selected_b_id, selected_b_name = int(row['key_mlbam']), f"{row['name_first']} {row['name_last']}"
