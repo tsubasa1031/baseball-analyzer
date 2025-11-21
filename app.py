@@ -125,7 +125,7 @@ def process_statcast_data(df_input):
         ab_events = hits + ['field_out', 'strikeout', 'grounded_into_double_play', 'double_play', 'fielders_choice', 'force_out']
         df['is_at_bat'] = events.isin(ab_events).astype(int)
         pa_events = ab_events + ['walk', 'hit_by_pitch', 'sac_fly']
-        df['is_pa_event'] = events.isin(pa_evts).astype(int)
+        df['is_pa_event'] = events.isin(pa_events).astype(int) # ★修正: pa_evts -> pa_events
         
         # K, BB, HR, SF カウント追加
         df['is_strikeout'] = events.isin(['strikeout', 'strikeout_double_play']).astype(int)
